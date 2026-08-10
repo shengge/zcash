@@ -1,7 +1,8 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2014 The Bitcoin Core developers
+// Copyright (c) 2016-2023 The Zcash developers
 // Distributed under the MIT software license, see the accompanying
-// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+// file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 #ifndef BITCOIN_SERIALIZE_H
 #define BITCOIN_SERIALIZE_H
@@ -16,6 +17,7 @@
 #include <list>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <stdint.h>
 #include <string>
@@ -23,7 +25,8 @@
 #include <utility>
 #include <vector>
 
-#include <boost/optional.hpp>
+
+#include <rust/ed25519.h>
 
 #include "prevector.h"
 
@@ -63,7 +66,7 @@ inline T* NCONST_PTR(const T* val)
     return const_cast<T*>(val);
 }
 
-/** 
+/**
  * Get begin pointer of vector (non-const version).
  * @note These functions avoid the undefined case of indexing into an empty
  * vector, as well as that of indexing after the end of the vector.
@@ -110,6 +113,11 @@ template<typename Stream> inline void ser_writedata32(Stream &s, uint32_t obj)
     obj = htole32(obj);
     s.write((char*)&obj, 4);
 }
+template<typename Stream> inline void ser_writedata32be(Stream &s, uint32_t obj)
+{
+    obj = htobe32(obj);
+    s.write((char*)&obj, 4);
+}
 template<typename Stream> inline void ser_writedata64(Stream &s, uint64_t obj)
 {
     obj = htole64(obj);
@@ -132,6 +140,12 @@ template<typename Stream> inline uint32_t ser_readdata32(Stream &s)
     uint32_t obj;
     s.read((char*)&obj, 4);
     return le32toh(obj);
+}
+template<typename Stream> inline uint32_t ser_readdata32be(Stream &s)
+{
+    uint32_t obj;
+    s.read((char*)&obj, 4);
+    return be32toh(obj);
 }
 template<typename Stream> inline uint64_t ser_readdata64(Stream &s)
 {
@@ -184,11 +198,11 @@ enum
 #define READWRITE(obj)      (::SerReadWrite(s, (obj), ser_action))
 #define READWRITEMANY(...)      (::SerReadWriteMany(s, ser_action, __VA_ARGS__))
 
-/** 
- * Implement three methods for serializable objects. These are actually wrappers over
- * "SerializationOp" template, which implements the body of each class' serialization
- * code. Adding "ADD_SERIALIZE_METHODS" in the body of the class causes these wrappers to be
- * added as members. 
+/**
+ * Implement two methods, "Serialize" and "Unserialize", for serializable objects. These are
+ * actually wrappers over the "SerializationOp" template method, which implements the body of each
+ * classes' serialization code. Adding "ADD_SERIALIZE_METHODS" in the body of the class causes these
+ * wrapper methods to be added as members.
  */
 #define ADD_SERIALIZE_METHODS                                         \
     template<typename Stream>                                         \
@@ -311,16 +325,16 @@ uint64_t ReadCompactSize(Stream& is)
  * sure the encoding is one-to-one, one is subtracted from all but the last digit.
  * Thus, the byte sequence a[] with length len, where all but the last byte
  * has bit 128 set, encodes the number:
- * 
+ *
  *  (a[len-1] & 0x7F) + sum(i=1..len-1, 128^i*((a[len-i-1] & 0x7F)+1))
- * 
+ *
  * Properties:
  * * Very small (0-127: 1 byte, 128-16511: 2 bytes, 16512-2113663: 3 bytes)
  * * Every integer has exactly one encoding
  * * Encoding does not depend on size of original integer type
  * * No redundancy: every (infinite) byte sequence corresponds to a list
  *   of encoded integers.
- * 
+ *
  * 0:         [0x00]  256:        [0x81 0x00]
  * 1:         [0x01]  16383:      [0xFE 0x7F]
  * 127:       [0x7F]  16384:      [0xFF 0x00]
@@ -381,7 +395,7 @@ I ReadVarInt(Stream& is)
 #define COMPACTSIZE(obj) REF(CCompactSize(REF(obj)))
 #define LIMITED_STRING(obj,n) REF(LimitedString< n >(REF(obj)))
 
-/** 
+/**
  * Wrapper for serializing arrays and POD.
  */
 class CFlatData
@@ -497,8 +511,11 @@ CVarInt<I> WrapVarInt(I& n) { return CVarInt<I>(n); }
 /**
  *  string
  */
-template<typename Stream, typename C> void Serialize(Stream& os, const std::basic_string<C>& str);
-template<typename Stream, typename C> void Unserialize(Stream& is, std::basic_string<C>& str);
+template<typename Stream, typename C, typename T, typename A>
+void Serialize(Stream& os, const std::basic_string<C, T, A>& str);
+
+template<typename Stream, typename C, typename T, typename A>
+void Unserialize(Stream& is, std::basic_string<C, T, A>& str);
 
 /**
  * prevector
@@ -525,8 +542,8 @@ template<typename Stream, typename T, typename A> inline void Unserialize(Stream
 /**
  * optional
  */
-template<typename Stream, typename T> void Serialize(Stream& os, const boost::optional<T>& item);
-template<typename Stream, typename T> void Unserialize(Stream& is, boost::optional<T>& item);
+template<typename Stream, typename T> void Serialize(Stream& os, const std::optional<T>& item);
+template<typename Stream, typename T> void Unserialize(Stream& is, std::optional<T>& item);
 
 /**
  * array
@@ -570,6 +587,24 @@ template<typename Stream, typename T> void Unserialize(Stream& os, std::shared_p
 template<typename Stream, typename T> void Serialize(Stream& os, const std::unique_ptr<const T>& p);
 template<typename Stream, typename T> void Unserialize(Stream& os, std::unique_ptr<const T>& p);
 
+/**
+ * ed25519::SigningKey
+ */
+template<typename Stream> void Serialize(Stream& os, const ed25519::SigningKey& item);
+template<typename Stream> void Unserialize(Stream& is, ed25519::SigningKey& item);
+
+/**
+ * ed25519::VerificationKey
+ */
+template<typename Stream> void Serialize(Stream& os, const ed25519::VerificationKey& item);
+template<typename Stream> void Unserialize(Stream& is, ed25519::VerificationKey& item);
+
+/**
+ * ed25519::Signature
+ */
+template<typename Stream> void Serialize(Stream& os, const ed25519::Signature& item);
+template<typename Stream> void Unserialize(Stream& is, ed25519::Signature& item);
+
 
 
 /**
@@ -594,16 +629,16 @@ inline void Unserialize(Stream& is, T& a)
 /**
  * string
  */
-template<typename Stream, typename C>
-void Serialize(Stream& os, const std::basic_string<C>& str)
+template<typename Stream, typename C, typename T, typename A>
+void Serialize(Stream& os, const std::basic_string<C, T, A>& str)
 {
     WriteCompactSize(os, str.size());
     if (!str.empty())
         os.write((char*)&str[0], str.size() * sizeof(str[0]));
 }
 
-template<typename Stream, typename C>
-void Unserialize(Stream& is, std::basic_string<C>& str)
+template<typename Stream, typename C, typename T, typename A>
+void Unserialize(Stream& is, std::basic_string<C, T, A>& str)
 {
     unsigned int nSize = ReadCompactSize(is);
     str.resize(nSize);
@@ -753,7 +788,7 @@ inline void Unserialize(Stream& is, std::vector<T, A>& v)
  * optional
  */
 template<typename Stream, typename T>
-void Serialize(Stream& os, const boost::optional<T>& item)
+void Serialize(Stream& os, const std::optional<T>& item)
 {
     // If the value is there, put 0x01 and then serialize the value.
     // If it's not, put 0x00.
@@ -768,13 +803,13 @@ void Serialize(Stream& os, const boost::optional<T>& item)
 }
 
 template<typename Stream, typename T>
-void Unserialize(Stream& is, boost::optional<T>& item)
+void Unserialize(Stream& is, std::optional<T>& item)
 {
     unsigned char discriminant = 0x00;
     Unserialize(is, discriminant);
 
     if (discriminant == 0x00) {
-        item = boost::none;
+        item = std::nullopt;
     } else if (discriminant == 0x01) {
         T object;
         Unserialize(is, object);
@@ -941,6 +976,57 @@ void Unserialize(Stream& is, std::shared_ptr<const T>& p)
 
 
 /**
+ * ed25519::SigningKey
+ */
+template<typename Stream>
+void Serialize(Stream& os, const ed25519::SigningKey& sk)
+{
+    Serialize(os, sk.bytes);
+}
+
+template<typename Stream>
+void Unserialize(Stream& is, ed25519::SigningKey& sk)
+{
+    Unserialize(is, sk.bytes);
+}
+
+
+
+/**
+ * ed25519::VerificationKey
+ */
+template<typename Stream>
+void Serialize(Stream& os, const ed25519::VerificationKey& vk)
+{
+    Serialize(os, vk.bytes);
+}
+
+template<typename Stream>
+void Unserialize(Stream& is, ed25519::VerificationKey& vk)
+{
+    Unserialize(is, vk.bytes);
+}
+
+
+
+/**
+ * ed25519::Signature
+ */
+template<typename Stream>
+void Serialize(Stream& os, const ed25519::Signature& sig)
+{
+    Serialize(os, sig.bytes);
+}
+
+template<typename Stream>
+void Unserialize(Stream& is, ed25519::Signature& sig)
+{
+    Unserialize(is, sig.bytes);
+}
+
+
+
+/**
  * Support for ADD_SERIALIZE_METHODS and READWRITE macro
  */
 struct CSerActionSerialize
@@ -992,6 +1078,11 @@ protected:
     const int nVersion;
 public:
     CSizeComputer(int nTypeIn, int nVersionIn) : nSize(0), nType(nTypeIn), nVersion(nVersionIn) {}
+
+    void write_u8(const unsigned char* pch, size_t nSize)
+    {
+        write(reinterpret_cast<const char*>(pch), nSize);
+    }
 
     void write(const char *psz, size_t _nSize)
     {

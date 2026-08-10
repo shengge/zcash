@@ -1,7 +1,8 @@
 // Copyright (c) 2010 Satoshi Nakamoto
 // Copyright (c) 2012 The Bitcoin Core developers
+// Copyright (c) 2017-2025 The Zcash developers
 // Distributed under the MIT software license, see the accompanying
-// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+// file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 #ifndef BITCOIN_UI_INTERFACE_H
 #define BITCOIN_UI_INTERFACE_H
@@ -15,6 +16,7 @@
 class CBasicKeyStore;
 class CWallet;
 class uint256;
+class CBlockIndex;
 
 /** General change type (added, updated, removed). */
 enum ChangeType
@@ -84,12 +86,6 @@ public:
     /** Number of network connections changed. */
     boost::signals2::signal<void (int newNumConnections)> NotifyNumConnectionsChanged;
 
-    /**
-     * New, updated or cancelled alert.
-     * @note called with lock cs_mapAlerts held.
-     */
-    boost::signals2::signal<void (const uint256 &hash, ChangeType status)> NotifyAlertChanged;
-
     /** A wallet has been loaded. */
     boost::signals2::signal<void (CWallet* wallet)> LoadWallet;
 
@@ -97,7 +93,16 @@ public:
     boost::signals2::signal<void (const std::string &title, int nProgress)> ShowProgress;
 
     /** New block has been accepted */
-    boost::signals2::signal<void (const uint256& hash)> NotifyBlockTip;
+    boost::signals2::signal<void (bool, const CBlockIndex *)> NotifyBlockTip;
+
+    /** Best header has changed */
+    boost::signals2::signal<void (bool, const CBlockIndex *)> NotifyHeaderTip;
+
+    /** Banlist did change. */
+    boost::signals2::signal<void (void)> BannedListChanged;
+
+    /** Transaction expired */
+    boost::signals2::signal<void (const uint256& txid)> NotifyTxExpiration;
 };
 
 extern CClientUIInterface uiInterface;

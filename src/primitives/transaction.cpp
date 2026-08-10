@@ -1,148 +1,18 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2014 The Bitcoin Core developers
+// Copyright (c) 2016-2023 The Zcash developers
 // Distributed under the MIT software license, see the accompanying
-// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+// file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 #include "primitives/transaction.h"
+#include "policy/policy.h"
 
 #include "hash.h"
 #include "tinyformat.h"
-#include "utilstrencodings.h"
+#include "util/strencodings.h"
+#include "zip317.h"
 
-#include "librustzcash.h"
-
-JSDescription::JSDescription(
-    bool makeGrothProof,
-    ZCJoinSplit& params,
-    const uint256& joinSplitPubKey,
-    const uint256& anchor,
-    const std::array<libzcash::JSInput, ZC_NUM_JS_INPUTS>& inputs,
-    const std::array<libzcash::JSOutput, ZC_NUM_JS_OUTPUTS>& outputs,
-    CAmount vpub_old,
-    CAmount vpub_new,
-    bool computeProof,
-    uint256 *esk // payment disclosure
-) : vpub_old(vpub_old), vpub_new(vpub_new), anchor(anchor)
-{
-    std::array<libzcash::SproutNote, ZC_NUM_JS_OUTPUTS> notes;
-
-    proof = params.prove(
-        makeGrothProof,
-        inputs,
-        outputs,
-        notes,
-        ciphertexts,
-        ephemeralKey,
-        joinSplitPubKey,
-        randomSeed,
-        macs,
-        nullifiers,
-        commitments,
-        vpub_old,
-        vpub_new,
-        anchor,
-        computeProof,
-        esk // payment disclosure
-    );
-}
-
-JSDescription JSDescription::Randomized(
-    bool makeGrothProof,
-    ZCJoinSplit& params,
-    const uint256& joinSplitPubKey,
-    const uint256& anchor,
-    std::array<libzcash::JSInput, ZC_NUM_JS_INPUTS>& inputs,
-    std::array<libzcash::JSOutput, ZC_NUM_JS_OUTPUTS>& outputs,
-    std::array<size_t, ZC_NUM_JS_INPUTS>& inputMap,
-    std::array<size_t, ZC_NUM_JS_OUTPUTS>& outputMap,
-    CAmount vpub_old,
-    CAmount vpub_new,
-    bool computeProof,
-    uint256 *esk, // payment disclosure
-    std::function<int(int)> gen
-)
-{
-    // Randomize the order of the inputs and outputs
-    inputMap = {0, 1};
-    outputMap = {0, 1};
-
-    assert(gen);
-
-    MappedShuffle(inputs.begin(), inputMap.begin(), ZC_NUM_JS_INPUTS, gen);
-    MappedShuffle(outputs.begin(), outputMap.begin(), ZC_NUM_JS_OUTPUTS, gen);
-
-    return JSDescription(
-        makeGrothProof,
-        params, joinSplitPubKey, anchor, inputs, outputs,
-        vpub_old, vpub_new, computeProof,
-        esk // payment disclosure
-    );
-}
-
-class SproutProofVerifier : public boost::static_visitor<bool>
-{
-    ZCJoinSplit& params;
-    libzcash::ProofVerifier& verifier;
-    const uint256& joinSplitPubKey;
-    const JSDescription& jsdesc;
-
-public:
-    SproutProofVerifier(
-        ZCJoinSplit& params,
-        libzcash::ProofVerifier& verifier,
-        const uint256& joinSplitPubKey,
-        const JSDescription& jsdesc
-        ) : params(params), jsdesc(jsdesc), verifier(verifier), joinSplitPubKey(joinSplitPubKey) {}
-
-    bool operator()(const libzcash::PHGRProof& proof) const
-    {
-        return params.verify(
-            proof,
-            verifier,
-            joinSplitPubKey,
-            jsdesc.randomSeed,
-            jsdesc.macs,
-            jsdesc.nullifiers,
-            jsdesc.commitments,
-            jsdesc.vpub_old,
-            jsdesc.vpub_new,
-            jsdesc.anchor
-        );
-    }
-
-    bool operator()(const libzcash::GrothProof& proof) const
-    {
-        uint256 h_sig = params.h_sig(jsdesc.randomSeed, jsdesc.nullifiers, joinSplitPubKey);
-
-        return librustzcash_sprout_verify(
-            proof.begin(),
-            jsdesc.anchor.begin(),
-            h_sig.begin(),
-            jsdesc.macs[0].begin(),
-            jsdesc.macs[1].begin(),
-            jsdesc.nullifiers[0].begin(),
-            jsdesc.nullifiers[1].begin(),
-            jsdesc.commitments[0].begin(),
-            jsdesc.commitments[1].begin(),
-            jsdesc.vpub_old,
-            jsdesc.vpub_new
-        );
-    }
-};
-
-bool JSDescription::Verify(
-    ZCJoinSplit& params,
-    libzcash::ProofVerifier& verifier,
-    const uint256& joinSplitPubKey
-) const {
-    auto pv = SproutProofVerifier(params, verifier, joinSplitPubKey, *this);
-    return boost::apply_visitor(pv, proof);
-}
-
-uint256 JSDescription::h_sig(ZCJoinSplit& params, const uint256& joinSplitPubKey) const
-{
-    return params.h_sig(randomSeed, nullifiers, joinSplitPubKey);
-}
+#include <rust/transaction.h>
 
 std::string COutPoint::ToString() const
 {
@@ -152,6 +22,11 @@ std::string COutPoint::ToString() const
 std::string SaplingOutPoint::ToString() const
 {
     return strprintf("SaplingOutPoint(%s, %u)", hash.ToString().substr(0, 10), n);
+}
+
+std::string OrchardOutPoint::ToString() const
+{
+    return strprintf("OrchardOutPoint(%s, %u)", hash.ToString().substr(0, 10), n);
 }
 
 CTxIn::CTxIn(COutPoint prevoutIn, CScript scriptSigIn, uint32_t nSequenceIn)
@@ -189,6 +64,22 @@ CTxOut::CTxOut(const CAmount& nValueIn, CScript scriptPubKeyIn)
     scriptPubKey = scriptPubKeyIn;
 }
 
+CAmount CTxOut::GetDustThreshold() const
+{
+    // See the comment on ONE_THIRD_DUST_THRESHOLD_RATE in policy.h.
+    static const CFeeRate oneThirdDustThresholdRate {ONE_THIRD_DUST_THRESHOLD_RATE};
+
+    if (scriptPubKey.IsUnspendable())
+        return 0;
+
+    // A typical spendable txout is 34 bytes, and will need a txin of at
+    // least 148 bytes to spend. With ONE_THIRD_DUST_THRESHOLD_RATE == 100,
+    // the dust threshold for such a txout would be
+    // 3*floor(100*(34 + 148)/1000) zats = 54 zats.
+    size_t nSize = GetSerializeSize(*this, SER_DISK, 0) + 148u;
+    return 3*oneThirdDustThresholdRate.GetFee(nSize);
+}
+
 uint256 CTxOut::GetHash() const
 {
     return SerializeHash(*this);
@@ -199,33 +90,84 @@ std::string CTxOut::ToString() const
     return strprintf("CTxOut(nValue=%d.%08d, scriptPubKey=%s)", nValue / COIN, nValue % COIN, HexStr(scriptPubKey).substr(0, 30));
 }
 
-CMutableTransaction::CMutableTransaction() : nVersion(CTransaction::SPROUT_MIN_CURRENT_VERSION), fOverwintered(false), nVersionGroupId(0), nExpiryHeight(0), nLockTime(0), valueBalance(0) {}
+
+CMutableTransaction::CMutableTransaction() : nVersion(CTransaction::SPROUT_MIN_CURRENT_VERSION), fOverwintered(false), nVersionGroupId(0), nExpiryHeight(0), nLockTime(0) {}
 CMutableTransaction::CMutableTransaction(const CTransaction& tx) : nVersion(tx.nVersion), fOverwintered(tx.fOverwintered), nVersionGroupId(tx.nVersionGroupId), nExpiryHeight(tx.nExpiryHeight),
+                                                                   nConsensusBranchId(tx.GetConsensusBranchId()),
                                                                    vin(tx.vin), vout(tx.vout), nLockTime(tx.nLockTime),
-                                                                   valueBalance(tx.valueBalance), vShieldedSpend(tx.vShieldedSpend), vShieldedOutput(tx.vShieldedOutput),
-                                                                   vjoinsplit(tx.vjoinsplit), joinSplitPubKey(tx.joinSplitPubKey), joinSplitSig(tx.joinSplitSig),
-                                                                   bindingSig(tx.bindingSig)
+                                                                   saplingBundle(tx.GetSaplingBundle()),
+                                                                   orchardBundle(tx.GetOrchardBundle()),
+                                                                   vJoinSplit(tx.vJoinSplit), joinSplitPubKey(tx.joinSplitPubKey), joinSplitSig(tx.joinSplitSig)
 {
-    
 }
 
 uint256 CMutableTransaction::GetHash() const
 {
-    return SerializeHash(*this);
+    CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
+    ss << *this;
+    uint256 hash;
+    if (!zcash_transaction_digests(
+        reinterpret_cast<const unsigned char*>(ss.data()),
+        ss.size(),
+        hash.begin(),
+        nullptr))
+    {
+        throw std::ios_base::failure("CMutableTransaction::GetHash: Invalid transaction format");
+    }
+    return hash;
+}
+
+uint256 CMutableTransaction::GetAuthDigest() const
+{
+    CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
+    ss << *this;
+    uint256 authDigest;
+    if (!zcash_transaction_digests(
+        reinterpret_cast<const unsigned char*>(ss.data()),
+        ss.size(),
+        nullptr,
+        authDigest.begin()))
+    {
+        throw std::ios_base::failure("CMutableTransaction::GetAuthDigest: Invalid transaction format");
+    }
+    return authDigest;
 }
 
 void CTransaction::UpdateHash() const
 {
-    *const_cast<uint256*>(&hash) = SerializeHash(*this);
+    CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
+    ss << *this;
+    // CONSENSUS: `zcash_transaction_digests` reparses the serialized transaction through
+    // librustzcash, which enforces consensus encoding rules (e.g. canonical Orchard element
+    // encodings, and from NU6.2 the canonical Orchard proof size, keyed on the transaction's
+    // own v5+ consensus branch id; see `zcash_transaction_digests` in src/rust/src/
+    // transaction_ffi.rs). This runs on construction of every CTransaction, so the throw
+    // below is how those rules reject a malformed transaction. Do not weaken this throw or
+    // skip the reparse on the assumption it is only computing hashes.
+    if (!zcash_transaction_digests(
+        reinterpret_cast<const unsigned char*>(ss.data()),
+        ss.size(),
+        const_cast<uint256*>(&wtxid.hash)->begin(),
+        const_cast<uint256*>(&wtxid.authDigest)->begin()))
+    {
+        throw std::ios_base::failure("CTransaction::UpdateHash: Invalid transaction format");
+    }
 }
 
-CTransaction::CTransaction() : nVersion(CTransaction::SPROUT_MIN_CURRENT_VERSION), fOverwintered(false), nVersionGroupId(0), nExpiryHeight(0), vin(), vout(), nLockTime(0), valueBalance(0), vShieldedSpend(), vShieldedOutput(), vjoinsplit(), joinSplitPubKey(), joinSplitSig(), bindingSig() { }
+CTransaction::CTransaction() : nVersion(CTransaction::SPROUT_MIN_CURRENT_VERSION),
+                               fOverwintered(false), nVersionGroupId(0), nExpiryHeight(0),
+                               nConsensusBranchId(std::nullopt),
+                               vin(), vout(), nLockTime(0),
+                               saplingBundle(),
+                               orchardBundle(),
+                               vJoinSplit(), joinSplitPubKey(), joinSplitSig() { }
 
 CTransaction::CTransaction(const CMutableTransaction &tx) : nVersion(tx.nVersion), fOverwintered(tx.fOverwintered), nVersionGroupId(tx.nVersionGroupId), nExpiryHeight(tx.nExpiryHeight),
+                                                            nConsensusBranchId(tx.nConsensusBranchId),
                                                             vin(tx.vin), vout(tx.vout), nLockTime(tx.nLockTime),
-                                                            valueBalance(tx.valueBalance), vShieldedSpend(tx.vShieldedSpend), vShieldedOutput(tx.vShieldedOutput),
-                                                            vjoinsplit(tx.vjoinsplit), joinSplitPubKey(tx.joinSplitPubKey), joinSplitSig(tx.joinSplitSig),
-                                                            bindingSig(tx.bindingSig)
+                                                            saplingBundle(tx.saplingBundle),
+                                                            orchardBundle(tx.orchardBundle),
+                                                            vJoinSplit(tx.vJoinSplit), joinSplitPubKey(tx.joinSplitPubKey), joinSplitSig(tx.joinSplitSig)
 {
     UpdateHash();
 }
@@ -235,19 +177,23 @@ CTransaction::CTransaction(const CMutableTransaction &tx) : nVersion(tx.nVersion
 CTransaction::CTransaction(
     const CMutableTransaction &tx,
     bool evilDeveloperFlag) : nVersion(tx.nVersion), fOverwintered(tx.fOverwintered), nVersionGroupId(tx.nVersionGroupId), nExpiryHeight(tx.nExpiryHeight),
+                              nConsensusBranchId(tx.nConsensusBranchId),
                               vin(tx.vin), vout(tx.vout), nLockTime(tx.nLockTime),
-                              valueBalance(tx.valueBalance), vShieldedSpend(tx.vShieldedSpend), vShieldedOutput(tx.vShieldedOutput),
-                              vjoinsplit(tx.vjoinsplit), joinSplitPubKey(tx.joinSplitPubKey), joinSplitSig(tx.joinSplitSig),
-                              bindingSig(tx.bindingSig)
+                              saplingBundle(tx.saplingBundle),
+                              orchardBundle(tx.orchardBundle),
+                              vJoinSplit(tx.vJoinSplit), joinSplitPubKey(tx.joinSplitPubKey), joinSplitSig(tx.joinSplitSig)
 {
     assert(evilDeveloperFlag);
 }
 
-CTransaction::CTransaction(CMutableTransaction &&tx) : nVersion(tx.nVersion), fOverwintered(tx.fOverwintered), nVersionGroupId(tx.nVersionGroupId),
-                                                       vin(std::move(tx.vin)), vout(std::move(tx.vout)), nLockTime(tx.nLockTime), nExpiryHeight(tx.nExpiryHeight),
-                                                       valueBalance(tx.valueBalance),
-                                                       vShieldedSpend(std::move(tx.vShieldedSpend)), vShieldedOutput(std::move(tx.vShieldedOutput)),
-                                                       vjoinsplit(std::move(tx.vjoinsplit)),
+CTransaction::CTransaction(CMutableTransaction &&tx) : nVersion(tx.nVersion),
+                                                       fOverwintered(tx.fOverwintered), nVersionGroupId(tx.nVersionGroupId),
+                                                       nConsensusBranchId(tx.nConsensusBranchId),
+                                                       vin(std::move(tx.vin)), vout(std::move(tx.vout)),
+                                                       nLockTime(tx.nLockTime), nExpiryHeight(tx.nExpiryHeight),
+                                                       saplingBundle(std::move(tx.saplingBundle)),
+                                                       orchardBundle(std::move(tx.orchardBundle)),
+                                                       vJoinSplit(std::move(tx.vJoinSplit)),
                                                        joinSplitPubKey(std::move(tx.joinSplitPubKey)), joinSplitSig(std::move(tx.joinSplitSig))
 {
     UpdateHash();
@@ -257,47 +203,69 @@ CTransaction& CTransaction::operator=(const CTransaction &tx) {
     *const_cast<bool*>(&fOverwintered) = tx.fOverwintered;
     *const_cast<int*>(&nVersion) = tx.nVersion;
     *const_cast<uint32_t*>(&nVersionGroupId) = tx.nVersionGroupId;
+    nConsensusBranchId = tx.nConsensusBranchId;
     *const_cast<std::vector<CTxIn>*>(&vin) = tx.vin;
     *const_cast<std::vector<CTxOut>*>(&vout) = tx.vout;
     *const_cast<unsigned int*>(&nLockTime) = tx.nLockTime;
     *const_cast<uint32_t*>(&nExpiryHeight) = tx.nExpiryHeight;
-    *const_cast<CAmount*>(&valueBalance) = tx.valueBalance;
-    *const_cast<std::vector<SpendDescription>*>(&vShieldedSpend) = tx.vShieldedSpend;
-    *const_cast<std::vector<OutputDescription>*>(&vShieldedOutput) = tx.vShieldedOutput;
-    *const_cast<std::vector<JSDescription>*>(&vjoinsplit) = tx.vjoinsplit;
-    *const_cast<uint256*>(&joinSplitPubKey) = tx.joinSplitPubKey;
-    *const_cast<joinsplit_sig_t*>(&joinSplitSig) = tx.joinSplitSig;
-    *const_cast<binding_sig_t*>(&bindingSig) = tx.bindingSig;
-    *const_cast<uint256*>(&hash) = tx.hash;
+    saplingBundle = tx.saplingBundle;
+    orchardBundle = tx.orchardBundle;
+    *const_cast<std::vector<JSDescription>*>(&vJoinSplit) = tx.vJoinSplit;
+    *const_cast<ed25519::VerificationKey*>(&joinSplitPubKey) = tx.joinSplitPubKey;
+    *const_cast<ed25519::Signature*>(&joinSplitSig) = tx.joinSplitSig;
+    *const_cast<uint256*>(&wtxid.hash) = tx.wtxid.hash;
+    *const_cast<uint256*>(&wtxid.authDigest) = tx.wtxid.authDigest;
     return *this;
 }
 
 CAmount CTransaction::GetValueOut() const
 {
     CAmount nValueOut = 0;
-    for (std::vector<CTxOut>::const_iterator it(vout.begin()); it != vout.end(); ++it)
-    {
-        nValueOut += it->nValue;
-        if (!MoneyRange(it->nValue) || !MoneyRange(nValueOut))
-            throw std::runtime_error("CTransaction::GetValueOut(): value out of range");
+    for (const auto& out : vout) {
+        if (!MoneyRange(out.nValue)) {
+            throw std::runtime_error("CTransaction::GetValueOut(): nValue out of range");
+        }
+        nValueOut += out.nValue;
+        if (!MoneyRange(nValueOut)) {
+            throw std::runtime_error("CTransaction::GetValueOut(): nValueOut out of range");
+        }
     }
 
-    if (valueBalance <= 0) {
-        // NB: negative valueBalance "takes" money from the transparent value pool just as outputs do
-        nValueOut += -valueBalance;
+    auto valueBalanceSapling = saplingBundle.GetValueBalance();
+    if (valueBalanceSapling <= 0) {
+        // NB: negative valueBalanceSapling "takes" money from the transparent value pool just as outputs do
+        if (!MoneyDeltaRange(valueBalanceSapling)) {
+            throw std::runtime_error("CTransaction::GetValueOut(): valueBalanceSapling out of range");
+        }
+        nValueOut += -valueBalanceSapling;
 
-        if (!MoneyRange(-valueBalance) || !MoneyRange(nValueOut)) {
+        if (!MoneyRange(nValueOut)) {
             throw std::runtime_error("CTransaction::GetValueOut(): value out of range");
         }
     }
 
-    for (std::vector<JSDescription>::const_iterator it(vjoinsplit.begin()); it != vjoinsplit.end(); ++it)
-    {
-        // NB: vpub_old "takes" money from the transparent value pool just as outputs do
-        nValueOut += it->vpub_old;
+    auto valueBalanceOrchard = orchardBundle.GetValueBalance();
+    if (valueBalanceOrchard <= 0) {
+        // NB: negative valueBalanceOrchard "takes" money from the transparent value pool just as outputs do
+        if (!MoneyDeltaRange(valueBalanceOrchard)) {
+            throw std::runtime_error("CTransaction::GetValueOut(): valueBalanceOrchard out of range");
+        }
+        nValueOut += -valueBalanceOrchard;
 
-        if (!MoneyRange(it->vpub_old) || !MoneyRange(nValueOut))
+        if (!MoneyRange(nValueOut)) {
             throw std::runtime_error("CTransaction::GetValueOut(): value out of range");
+        }
+    }
+
+    for (const auto& jsDescription : vJoinSplit) {
+        // NB: vpub_old "takes" money from the transparent value pool just as outputs do
+        if (!MoneyRange(jsDescription.vpub_old)) {
+            throw std::runtime_error("CTransaction::GetValueOut(): vpub_old out of range");
+        }
+        nValueOut += jsDescription.vpub_old;
+        if (!MoneyRange(nValueOut)) {
+            throw std::runtime_error("CTransaction::GetValueOut(): value out of range");
+        }
     }
     return nValueOut;
 }
@@ -306,51 +274,61 @@ CAmount CTransaction::GetShieldedValueIn() const
 {
     CAmount nValue = 0;
 
-    if (valueBalance >= 0) {
-        // NB: positive valueBalance "gives" money to the transparent value pool just as inputs do
-        nValue += valueBalance;
+    auto valueBalanceSapling = saplingBundle.GetValueBalance();
+    if (valueBalanceSapling >= 0) {
+        // NB: positive valueBalanceSapling "gives" money to the transparent value pool just as inputs do
+        if (valueBalanceSapling > MAX_MONEY) {
+            throw std::runtime_error("CTransaction::GetShieldedValueIn(): valueBalanceSapling out of range");
+        }
+        nValue += valueBalanceSapling;
 
-        if (!MoneyRange(valueBalance) || !MoneyRange(nValue)) {
+        if (!MoneyRange(nValue)) {
             throw std::runtime_error("CTransaction::GetShieldedValueIn(): value out of range");
         }
     }
 
-    for (std::vector<JSDescription>::const_iterator it(vjoinsplit.begin()); it != vjoinsplit.end(); ++it)
-    {
-        // NB: vpub_new "gives" money to the transparent value pool just as inputs do
-        nValue += it->vpub_new;
+    auto valueBalanceOrchard = orchardBundle.GetValueBalance();
+    if (valueBalanceOrchard >= 0) {
+        // NB: positive valueBalanceOrchard "gives" money to the transparent value pool just as inputs do
+        if (valueBalanceOrchard > MAX_MONEY) {
+            throw std::runtime_error("CTransaction::GetShieldedValueIn(): valueBalanceOrchard out of range");
+        }
+        nValue += valueBalanceOrchard;
+        if (!MoneyRange(nValue)) {
+            throw std::runtime_error("CTransaction::GetShieldedValueIn(): nValue out of range");
+        }
+    }
 
-        if (!MoneyRange(it->vpub_new) || !MoneyRange(nValue))
+    for (const auto& jsDescription : vJoinSplit) {
+        // NB: vpub_new "gives" money to the transparent value pool just as inputs do
+        if (!MoneyRange(jsDescription.vpub_new)) {
+            throw std::runtime_error("CTransaction::GetShieldedValueIn(): vpub_new out of range");
+        }
+        nValue += jsDescription.vpub_new;
+        if (!MoneyRange(nValue)) {
             throw std::runtime_error("CTransaction::GetShieldedValueIn(): value out of range");
+        }
+    }
+
+    if (IsCoinBase() && nValue != 0) {
+        throw std::runtime_error("CTransaction::GetShieldedValueIn(): shielded value of inputs must be zero in coinbase transactions.");
     }
 
     return nValue;
 }
 
-double CTransaction::ComputePriority(double dPriorityInputs, unsigned int nTxSize) const
-{
-    nTxSize = CalculateModifiedSize(nTxSize);
-    if (nTxSize == 0) return 0.0;
-
-    return dPriorityInputs / nTxSize;
+CAmount CTransaction::GetConventionalFee() const {
+    return CalculateConventionalFee(GetLogicalActionCount());
 }
 
-unsigned int CTransaction::CalculateModifiedSize(unsigned int nTxSize) const
-{
-    // In order to avoid disincentivizing cleaning up the UTXO set we don't count
-    // the constant overhead for each txin and up to 110 bytes of scriptSig (which
-    // is enough to cover a compressed pubkey p2sh redemption) for priority.
-    // Providing any more cleanup incentive than making additional inputs free would
-    // risk encouraging people to create junk outputs to redeem later.
-    if (nTxSize == 0)
-        nTxSize = ::GetSerializeSize(*this, SER_NETWORK, PROTOCOL_VERSION);
-    for (std::vector<CTxIn>::const_iterator it(vin.begin()); it != vin.end(); ++it)
-    {
-        unsigned int offset = 41U + std::min(110U, (unsigned int)it->scriptSig.size());
-        if (nTxSize > offset)
-            nTxSize -= offset;
-    }
-    return nTxSize;
+size_t CTransaction::GetLogicalActionCount() const {
+    return CalculateLogicalActionCount(
+            vin,
+            vout,
+            vJoinSplit.size(),
+            GetSaplingSpendsCount(),
+            GetSaplingOutputsCount(),
+            orchardBundle.GetNumActions());
 }
 
 std::string CTransaction::ToString() const
@@ -364,7 +342,7 @@ std::string CTransaction::ToString() const
             vout.size(),
             nLockTime);
     } else if (nVersion >= SAPLING_MIN_TX_VERSION) {
-        str += strprintf("CTransaction(hash=%s, ver=%d, fOverwintered=%d, nVersionGroupId=%08x, vin.size=%u, vout.size=%u, nLockTime=%u, nExpiryHeight=%u, valueBalance=%u, vShieldedSpend.size=%u, vShieldedOutput.size=%u)\n",
+        str += strprintf("CTransaction(hash=%s, ver=%d, fOverwintered=%d, nVersionGroupId=%08x, vin.size=%u, vout.size=%u, nLockTime=%u, nExpiryHeight=%u, valueBalanceSapling=%u, vSaplingSpend.size=%u, vSaplingOutput.size=%u",
             GetHash().ToString().substr(0,10),
             nVersion,
             fOverwintered,
@@ -373,9 +351,16 @@ std::string CTransaction::ToString() const
             vout.size(),
             nLockTime,
             nExpiryHeight,
-            valueBalance,
-            vShieldedSpend.size(),
-            vShieldedOutput.size());
+            saplingBundle.GetValueBalance(),
+            GetSaplingSpendsCount(),
+            GetSaplingOutputsCount());
+        if (nVersion >= ZIP225_MIN_TX_VERSION) {
+            str += strprintf(", nConsensusBranchId=%08x, valueBalanceOrchard=%u, vOrchardAction.size=%u",
+                nConsensusBranchId.value_or(0),
+                orchardBundle.GetValueBalance(),
+                orchardBundle.GetNumActions());
+        }
+        str += ")\n";
     } else if (nVersion >= 3) {
         str += strprintf("CTransaction(hash=%s, ver=%d, fOverwintered=%d, nVersionGroupId=%08x, vin.size=%u, vout.size=%u, nLockTime=%u, nExpiryHeight=%u)\n",
             GetHash().ToString().substr(0,10),

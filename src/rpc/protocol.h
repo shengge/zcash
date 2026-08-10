@@ -1,16 +1,18 @@
 // Copyright (c) 2010 Satoshi Nakamoto
 // Copyright (c) 2009-2014 The Bitcoin Core developers
+// Copyright (c) 2019-2023 The Zcash developers
 // Distributed under the MIT software license, see the accompanying
-// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+// file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
-#ifndef BITCOIN_RPCPROTOCOL_H
-#define BITCOIN_RPCPROTOCOL_H
+#ifndef BITCOIN_RPC_PROTOCOL_H
+#define BITCOIN_RPC_PROTOCOL_H
+
+#include "fs.h"
 
 #include <list>
 #include <map>
 #include <stdint.h>
 #include <string>
-#include <boost/filesystem.hpp>
 
 #include <univalue.h>
 
@@ -74,6 +76,7 @@ enum RPCErrorCode
     RPC_WALLET_WRONG_ENC_STATE      = -15, //! Command given in wrong wallet encryption state (encrypting an encrypted wallet etc.)
     RPC_WALLET_ENCRYPTION_FAILED    = -16, //! Failed to encrypt the wallet
     RPC_WALLET_ALREADY_UNLOCKED     = -17, //! Wallet is already unlocked
+    RPC_WALLET_BACKUP_REQUIRED      = -18, //! User must acknowledge backup of the mnemonic seed.
 };
 
 std::string JSONRPCRequest(const std::string& strMethod, const UniValue& params, const UniValue& id);
@@ -81,8 +84,6 @@ UniValue JSONRPCReplyObj(const UniValue& result, const UniValue& error, const Un
 std::string JSONRPCReply(const UniValue& result, const UniValue& error, const UniValue& id);
 UniValue JSONRPCError(int code, const std::string& message);
 
-/** Get name of RPC authentication cookie file */
-boost::filesystem::path GetAuthCookieFile();
 /** Generate a new RPC authentication cookie and write it to disk */
 bool GenerateAuthCookie(std::string *cookie_out);
 /** Read the RPC authentication cookie from disk */
@@ -90,4 +91,4 @@ bool GetAuthCookie(std::string *cookie_out);
 /** Delete RPC authentication cookie from disk */
 void DeleteAuthCookie();
 
-#endif // BITCOIN_RPCPROTOCOL_H
+#endif // BITCOIN_RPC_PROTOCOL_H

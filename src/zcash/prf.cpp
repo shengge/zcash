@@ -4,8 +4,11 @@
 
 #include <array>
 #include <librustzcash.h>
+#include <rust/blake2b.h>
+#include <rust/constants.h>
+#include <rust/sapling/spec.h>
 
-const unsigned char ZCASH_EXPANDSEED_PERSONALIZATION[crypto_generichash_blake2b_PERSONALBYTES] = {'Z','c','a','s','h','_','E','x','p','a','n','d','S','e','e','d'};
+const unsigned char ZCASH_EXPANDSEED_PERSONALIZATION[blake2b::PERSONALBYTES] = {'Z','c','a','s','h','_','E','x','p','a','n','d','S','e','e','d'};
 
 // Sapling 
 std::array<unsigned char, 64> PRF_expand(const uint256& sk, unsigned char t)
@@ -15,35 +18,42 @@ std::array<unsigned char, 64> PRF_expand(const uint256& sk, unsigned char t)
 
     memcpy(&blob[0], sk.begin(), 32);
     blob[32] = t;
-        
-    crypto_generichash_blake2b_state state;
-    crypto_generichash_blake2b_init_salt_personal(&state, nullptr, 0, 64, nullptr, ZCASH_EXPANDSEED_PERSONALIZATION);
-    crypto_generichash_blake2b_update(&state, blob, 33);
-    crypto_generichash_blake2b_final(&state, res.data(), 64);
-    
+
+    auto state = blake2b::init(64, {ZCASH_EXPANDSEED_PERSONALIZATION, blake2b::PERSONALBYTES});
+    state->update({blob, 33});
+    state->finalize({res.data(), 64});
+
     return res;
+}
+
+uint256 PRF_rcm(const uint256& rseed)
+{
+    auto tmp = PRF_expand(rseed, PRF_RCM_TAG);
+    return uint256::FromRawBytes(sapling::spec::to_scalar(tmp));
+}
+
+uint256 PRF_esk(const uint256& rseed)
+{
+    auto tmp = PRF_expand(rseed, PRF_ESK_TAG);
+    return uint256::FromRawBytes(sapling::spec::to_scalar(tmp));
 }
 
 uint256 PRF_ask(const uint256& sk)
 {
-    uint256 ask;
-    auto tmp = PRF_expand(sk, 0);
-    librustzcash_to_scalar(tmp.data(), ask.begin());
-    return ask;
+    auto tmp = PRF_expand(sk, PRF_ASK_TAG);
+    return uint256::FromRawBytes(sapling::spec::to_scalar(tmp));
 }
 
 uint256 PRF_nsk(const uint256& sk)
 {
-    uint256 nsk;
-    auto tmp = PRF_expand(sk, 1);
-    librustzcash_to_scalar(tmp.data(), nsk.begin());
-    return nsk;
+    auto tmp = PRF_expand(sk, PRF_NSK_TAG);
+    return uint256::FromRawBytes(sapling::spec::to_scalar(tmp));
 }
 
 uint256 PRF_ovk(const uint256& sk)
 {
     uint256 ovk;
-    auto tmp = PRF_expand(sk, 2);
+    auto tmp = PRF_expand(sk, PRF_OVK_TAG);
     memcpy(ovk.begin(), tmp.data(), 32);
     return ovk;
 }
@@ -58,12 +68,11 @@ std::array<unsigned char, 11> default_diversifier(const uint256& sk)
     
     blob[33] = 0;
     while (true) {
-        crypto_generichash_blake2b_state state;
-        crypto_generichash_blake2b_init_salt_personal(&state, nullptr, 0, 64, nullptr, ZCASH_EXPANDSEED_PERSONALIZATION);
-        crypto_generichash_blake2b_update(&state, blob, 34);
-        crypto_generichash_blake2b_final(&state, res.data(), 11);
-        
-        if (librustzcash_check_diversifier(res.data())) {
+        auto state = blake2b::init(64, {ZCASH_EXPANDSEED_PERSONALIZATION, blake2b::PERSONALBYTES});
+        state->update({blob, 34});
+        state->finalize({res.data(), 11});
+
+        if (sapling::spec::check_diversifier(res)) {
             break;
         } else if (blob[33] == 255) {
             throw std::runtime_error("librustzcash_check_diversifier did not return valid diversifier");

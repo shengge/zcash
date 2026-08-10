@@ -1,4 +1,6 @@
-#!/bin/bash
+#!/usr/bin/env bash
+
+export LC_ALL=C
 set -u
 
 
@@ -84,18 +86,21 @@ function zcashd_stop {
     wait $ZCASHD_PID
 }
 
-function zcashd_massif_start {
+function zcashd_heaptrack_start {
+    TEST_NAME="$1"
     case "$1" in
         sendtoaddress|loadwallet|listunspent)
             case "$2" in
                 200k-recv)
                     use_200k_benchmark 0
+                    TEST_NAME="${TEST_NAME}-200k-recv"
                     ;;
                 200k-send)
                     use_200k_benchmark 1
+                    TEST_NAME="${TEST_NAME}-200k-send"
                     ;;
                 *)
-                    echo "Bad arguments to zcashd_massif_start."
+                    echo "Bad arguments to zcashd_heaptrack_start."
                     exit 1
             esac
             ;;
@@ -104,16 +109,14 @@ function zcashd_massif_start {
             mkdir -p "$DATADIR/regtest"
             touch "$DATADIR/zcash.conf"
     esac
-    rm -f massif.out
-    valgrind --tool=massif --time-unit=ms --massif-out-file=massif.out ./src/zcashd -regtest -datadir="$DATADIR" -rpcuser=user -rpcpassword=password -rpcport=5983 -showmetrics=0 &
+    heaptrack -o "${TEST_NAME}" ./src/zcashd -regtest -datadir="$DATADIR" -rpcuser=user -rpcpassword=password -rpcport=5983 -showmetrics=0 &
     ZCASHD_PID=$!
     zcash_rpc_wait_for_start
 }
 
-function zcashd_massif_stop {
+function zcashd_heaptrack_stop {
     zcash_rpc stop > /dev/null
     wait $ZCASHD_PID
-    ms_print massif.out
 }
 
 function zcashd_valgrind_start {
@@ -133,14 +136,14 @@ function zcashd_valgrind_stop {
 }
 
 function extract_benchmark_data {
-    if [ -f "block-107134.tar.xz" ]; then
+    if [ -f "$1.tar.xz" ]; then
         # Check the hash of the archive:
         "$SHA256CMD" $SHA256ARGS -c <<EOF
-4bd5ad1149714394e8895fa536725ed5d6c32c99812b962bfa73f03b5ffad4bb  block-107134.tar.xz
+$2  $1.tar.xz
 EOF
         ARCHIVE_RESULT=$?
     else
-        echo "block-107134.tar.xz not found."
+        echo "$1.tar.xz not found."
         ARCHIVE_RESULT=1
     fi
     if [ $ARCHIVE_RESULT -ne 0 ]; then
@@ -151,7 +154,19 @@ EOF
         echo "Usage details are inside the Python script."
         exit 1
     fi
-    xzcat block-107134.tar.xz | tar x -C "$DATADIR/regtest"
+    xzcat $1.tar.xz | tar x -C "$DATADIR/regtest"
+}
+
+function extract_benchmark_data_107134 {
+    extract_benchmark_data block-107134 4bd5ad1149714394e8895fa536725ed5d6c32c99812b962bfa73f03b5ffad4bb
+}
+
+function extract_benchmark_data_1708048 {
+    extract_benchmark_data block-1708048 bdae4b1baf528fa93d86b902e1032d4d1fc3d3080f76cd284635787e472f2534
+}
+
+function extract_benchmark_data_1723244 {
+    extract_benchmark_data block-1723244 94acfef482103a61c848ddaa3129877cba987c4a00fa42425f4cf030b7c3fa4c
 }
 
 
@@ -182,6 +197,18 @@ case "$1" in
             parameterloading)
                 zcash_rpc zcbenchmark parameterloading 10
                 ;;
+            createsaplingspend)
+                zcash_rpc zcbenchmark createsaplingspend 10
+                ;;
+            verifysaplingspend)
+                zcash_rpc zcbenchmark verifysaplingspend 1000
+                ;;
+            createsaplingoutput)
+                zcash_rpc zcbenchmark createsaplingoutput 50
+                ;;
+            verifysaplingoutput)
+                zcash_rpc zcbenchmark verifysaplingoutput 1000
+                ;;
             createjoinsplit)
                 zcash_rpc zcbenchmark createjoinsplit 10 "${@:3}"
                 ;;
@@ -204,8 +231,16 @@ case "$1" in
                 zcash_rpc zcbenchmark incnotewitnesses 100 "${@:3}"
                 ;;
             connectblockslow)
-                extract_benchmark_data
+                extract_benchmark_data_107134
                 zcash_rpc zcbenchmark connectblockslow 10
+                ;;
+            connectblocksapling)
+                extract_benchmark_data_1723244
+                zcash_rpc zcbenchmark connectblocksapling 10
+                ;;
+            connectblockorchard)
+                extract_benchmark_data_1708048
+                zcash_rpc zcbenchmark connectblockorchard 10
                 ;;
             sendtoaddress)
                 zcash_rpc zcbenchmark sendtoaddress 10 "${@:4}"
@@ -224,13 +259,25 @@ case "$1" in
         zcashd_stop
         ;;
     memory)
-        zcashd_massif_start "${@:2}"
+        zcashd_heaptrack_start "${@:2}"
         case "$2" in
             sleep)
                 zcash_rpc zcbenchmark sleep 1
                 ;;
             parameterloading)
                 zcash_rpc zcbenchmark parameterloading 1
+                ;;
+            createsaplingspend)
+                zcash_rpc zcbenchmark createsaplingspend 1
+                ;;
+            verifysaplingspend)
+                zcash_rpc zcbenchmark verifysaplingspend 1
+                ;;
+            createsaplingoutput)
+                zcash_rpc zcbenchmark createsaplingoutput 1
+                ;;
+            verifysaplingoutput)
+                zcash_rpc zcbenchmark verifysaplingoutput 1
                 ;;
             createjoinsplit)
                 zcash_rpc_slow zcbenchmark createjoinsplit 1 "${@:3}"
@@ -254,8 +301,16 @@ case "$1" in
                 zcash_rpc zcbenchmark incnotewitnesses 1 "${@:3}"
                 ;;
             connectblockslow)
-                extract_benchmark_data
+                extract_benchmark_data_107134
                 zcash_rpc zcbenchmark connectblockslow 1
+                ;;
+            connectblocksapling)
+                extract_benchmark_data_1723244
+                zcash_rpc zcbenchmark connectblocksapling 1
+                ;;
+            connectblockorchard)
+                extract_benchmark_data_1708048
+                zcash_rpc zcbenchmark connectblockorchard 1
                 ;;
             sendtoaddress)
                 zcash_rpc zcbenchmark sendtoaddress 1 "${@:4}"
@@ -267,12 +322,11 @@ case "$1" in
                 zcash_rpc zcbenchmark listunspent 1
                 ;;
             *)
-                zcashd_massif_stop
+                zcashd_heaptrack_stop
                 echo "Bad arguments to memory."
                 exit 1
         esac
-        zcashd_massif_stop
-        rm -f massif.out
+        zcashd_heaptrack_stop
         ;;
     valgrind)
         zcashd_valgrind_start
@@ -282,6 +336,18 @@ case "$1" in
                 ;;
             parameterloading)
                 zcash_rpc zcbenchmark parameterloading 1
+                ;;
+            createsaplingspend)
+                zcash_rpc zcbenchmark createsaplingspend 1
+                ;;
+            verifysaplingspend)
+                zcash_rpc zcbenchmark verifysaplingspend 1
+                ;;
+            createsaplingoutput)
+                zcash_rpc zcbenchmark createsaplingoutput 1
+                ;;
+            verifysaplingoutput)
+                zcash_rpc zcbenchmark verifysaplingoutput 1
                 ;;
             createjoinsplit)
                 zcash_rpc_veryslow zcbenchmark createjoinsplit 1 "${@:3}"
@@ -302,8 +368,16 @@ case "$1" in
                 zcash_rpc zcbenchmark incnotewitnesses 1 "${@:3}"
                 ;;
             connectblockslow)
-                extract_benchmark_data
+                extract_benchmark_data_107134
                 zcash_rpc zcbenchmark connectblockslow 1
+                ;;
+            connectblocksapling)
+                extract_benchmark_data_1723244
+                zcash_rpc zcbenchmark connectblocksapling 1
+                ;;
+            connectblockorchard)
+                extract_benchmark_data_1708048
+                zcash_rpc zcbenchmark connectblockorchard 1
                 ;;
             *)
                 zcashd_valgrind_stop

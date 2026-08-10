@@ -1,24 +1,23 @@
-#!/usr/bin/env python2
+#!/usr/bin/env python3
 # Copyright (c) 2018 The Zcash developers
 # Distributed under the MIT software license, see the accompanying
-# file COPYING or http://www.opensource.org/licenses/mit-license.php.
+# file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 from test_framework.test_framework import BitcoinTestFramework
 from mergetoaddress_helper import MergeToAddressHelper
 
+def get_new_address(test, node):
+    return test.nodes[node].z_getnewaddress('sapling')
 
 class MergeToAddressSapling (BitcoinTestFramework):
-    # 13505 would be the maximum number of utxos based on the transaction size limits for Sapling
-    # but testing this causes the test to take an indeterminately long time to run.
-    helper = MergeToAddressHelper('sapling', 'ANY_SAPLING', 800, 800, 0, False)
+    helper = MergeToAddressHelper(get_new_address, 'ANY_SAPLING')
 
     def setup_chain(self):
         self.helper.setup_chain(self)
 
     def setup_network(self, split=False):
         self.helper.setup_network(self, [
-            '-nuparams=5ba81b19:100',  # Overwinter
-            '-nuparams=76b809bb:100',  # Sapling
+            '-anchorconfirmations=1',
         ])
 
     def run_test(self):

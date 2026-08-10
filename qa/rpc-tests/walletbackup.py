@@ -1,7 +1,8 @@
-#!/usr/bin/env python2
-# Copyright (c) 2014 The Bitcoin Core developers
+#!/usr/bin/env python3
+# Copyright (c) 2014-2016 The Bitcoin Core developers
+# Copyright (c) 2016-2022 The Zcash developers
 # Distributed under the MIT software license, see the accompanying
-# file COPYING or http://www.opensource.org/licenses/mit-license.php.
+# file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 """
 Exercise the wallet backup code.  Ported from walletbackup.sh.
@@ -16,7 +17,7 @@ Then 5 iterations of 1/2/3 sending coins amongst
 themselves to get transactions in the wallets,
 and the miner mining one block.
 
-Wallets are backed up using dumpwallet/backupwallet.
+Wallets are backed up using z_exportwallet/backupwallet.
 Then 5 more iterations of transactions and mining a block.
 
 Miner then generates 101 more blocks, so any
@@ -35,7 +36,7 @@ and confirm again balances are correct.
 
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.authproxy import JSONRPCException
-from test_framework.util import assert_equal, initialize_chain_clean, \
+from test_framework.util import assert_equal, \
     start_nodes, start_node, connect_nodes, stop_node, \
     sync_blocks, sync_mempools
 
@@ -44,14 +45,16 @@ import shutil
 from random import randint
 from decimal import Decimal
 import logging
+import sys
 
-logging.basicConfig(format='%(levelname)s:%(message)s', level=logging.INFO)
+logging.basicConfig(format='%(levelname)s: %(message)s', level=logging.INFO, stream=sys.stdout)
 
 class WalletBackupTest(BitcoinTestFramework):
 
-    def setup_chain(self):
-        logging.info("Initializing test directory "+self.options.tmpdir)
-        initialize_chain_clean(self.options.tmpdir, 4)
+    def __init__(self):
+        super().__init__()
+        self.cache_behavior = 'clean'
+        self.num_nodes = 4
 
     # This mirrors how the network was setup in the bash test
     def setup_network(self, split=False):
@@ -61,8 +64,12 @@ class WalletBackupTest(BitcoinTestFramework):
         ed2 = "-exportdir=" + self.options.tmpdir + "/node2"
 
         # nodes 1, 2,3 are spenders, let's give them a keypool=100
-        extra_args = [["-keypool=100", ed0], ["-keypool=100", ed1], ["-keypool=100", ed2], []]
-        self.nodes = start_nodes(4, self.options.tmpdir, extra_args)
+        base_args = [
+            "-keypool=100",
+            "-allowdeprecated=getnewaddress",
+        ]
+        extra_args = [base_args + [ed0], base_args + [ed1], base_args + [ed2], []]
+        self.nodes = start_nodes(self.num_nodes, self.options.tmpdir, extra_args)
         connect_nodes(self.nodes[0], 3)
         connect_nodes(self.nodes[1], 3)
         connect_nodes(self.nodes[2], 3)
@@ -91,12 +98,14 @@ class WalletBackupTest(BitcoinTestFramework):
         # Must sync mempools before mining.
         sync_mempools(self.nodes)
         self.nodes[3].generate(1)
+        self.sync_all()
 
     # As above, this mirrors the original bash test.
-    def start_three(self):
-        self.nodes[0] = start_node(0, self.options.tmpdir)
-        self.nodes[1] = start_node(1, self.options.tmpdir)
-        self.nodes[2] = start_node(2, self.options.tmpdir)
+    def start_three(self, extra_args=[]):
+        extra_args = extra_args + ["-allowdeprecated=getnewaddress"]
+        self.nodes[0] = start_node(0, self.options.tmpdir, extra_args)
+        self.nodes[1] = start_node(1, self.options.tmpdir, extra_args)
+        self.nodes[2] = start_node(2, self.options.tmpdir, extra_args)
         connect_nodes(self.nodes[0], 3)
         connect_nodes(self.nodes[1], 3)
         connect_nodes(self.nodes[2], 3)
@@ -136,15 +145,15 @@ class WalletBackupTest(BitcoinTestFramework):
         logging.info("Backing up")
         tmpdir = self.options.tmpdir
         self.nodes[0].backupwallet("walletbak")
-        self.nodes[0].dumpwallet("walletdump")
+        self.nodes[0].z_exportwallet("walletdump")
         self.nodes[1].backupwallet("walletbak")
-        self.nodes[1].dumpwallet("walletdump")
+        self.nodes[1].z_exportwallet("walletdump")
         self.nodes[2].backupwallet("walletbak")
-        self.nodes[2].dumpwallet("walletdump")
+        self.nodes[2].z_exportwallet("walletdump")
 
-        # Verify dumpwallet cannot overwrite an existing file
+        # Verify z_exportwallet cannot overwrite an existing file
         try:
-            self.nodes[2].dumpwallet("walletdump")
+            self.nodes[2].z_exportwallet("walletdump")
             assert(False)
         except JSONRPCException as e:
             errorString = e.error['message']
@@ -188,6 +197,29 @@ class WalletBackupTest(BitcoinTestFramework):
         self.start_three()
         sync_blocks(self.nodes)
 
+        # We made extra transactions that involved addresses generated after the
+        # backups were taken, and external addresses do not use the keypool, so
+        # the balances shouldn't line up.
+        balance0backup = self.nodes[0].getbalance()
+        balance1backup = self.nodes[1].getbalance()
+        balance2backup = self.nodes[2].getbalance()
+        assert(balance0backup != balance0)
+        assert(balance1backup != balance1)
+        assert(balance2backup != balance2)
+
+        # However, because addresses are derived deterministically, we can
+        # recover the balances by generating the extra addresses and then
+        # rescanning.
+        for i in range(5):
+            self.nodes[0].getnewaddress()
+            self.nodes[1].getnewaddress()
+            self.nodes[2].getnewaddress()
+
+        logging.info("Re-starting nodes with -rescan")
+        self.stop_three()
+        self.start_three(['-rescan'])
+        sync_blocks(self.nodes)
+
         assert_equal(self.nodes[0].getbalance(), balance0)
         assert_equal(self.nodes[1].getbalance(), balance1)
         assert_equal(self.nodes[2].getbalance(), balance2)
@@ -201,6 +233,7 @@ class WalletBackupTest(BitcoinTestFramework):
         shutil.rmtree(self.options.tmpdir + "/node2/regtest/chainstate")
 
         self.start_three()
+        sync_blocks(self.nodes)
 
         assert_equal(self.nodes[0].getbalance(), 0)
         assert_equal(self.nodes[1].getbalance(), 0)
@@ -212,9 +245,9 @@ class WalletBackupTest(BitcoinTestFramework):
 
         sync_blocks(self.nodes)
 
-        assert_equal(self.nodes[0].getbalance(), balance0)
-        assert_equal(self.nodes[1].getbalance(), balance1)
-        assert_equal(self.nodes[2].getbalance(), balance2)
+        assert_equal(self.nodes[0].getbalance(), balance0backup)
+        assert_equal(self.nodes[1].getbalance(), balance1backup)
+        assert_equal(self.nodes[2].getbalance(), balance2backup)
 
 
 if __name__ == '__main__':

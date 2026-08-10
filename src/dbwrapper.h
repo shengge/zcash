@@ -1,23 +1,24 @@
 // Copyright (c) 2012-2014 The Bitcoin Core developers
+// Copyright (c) 2019-2023 The Zcash developers
 // Distributed under the MIT software license, see the accompanying
-// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+// file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 #ifndef BITCOIN_DBWRAPPER_H
 #define BITCOIN_DBWRAPPER_H
 
 #include "clientversion.h"
+#include "fs.h"
 #include "serialize.h"
 #include "streams.h"
-#include "util.h"
+#include "util/system.h"
 #include "version.h"
-
-#include <boost/filesystem/path.hpp>
 
 #include <leveldb/db.h>
 #include <leveldb/write_batch.h>
 
 static const size_t DBWRAPPER_PREALLOC_KEY_SIZE = 64;
 static const size_t DBWRAPPER_PREALLOC_VALUE_SIZE = 1024;
+static const size_t DBWRAPPER_MAX_FILE_SIZE = 32 << 20; // 32 MiB
 
 class dbwrapper_error : public std::runtime_error
 {
@@ -58,12 +59,12 @@ public:
         CDataStream ssKey(SER_DISK, CLIENT_VERSION);
         ssKey.reserve(DBWRAPPER_PREALLOC_KEY_SIZE);
         ssKey << key;
-        leveldb::Slice slKey(&ssKey[0], ssKey.size());
+        leveldb::Slice slKey(ssKey.data(), ssKey.size());
 
         CDataStream ssValue(SER_DISK, CLIENT_VERSION);
         ssValue.reserve(DBWRAPPER_PREALLOC_VALUE_SIZE);
         ssValue << value;
-        leveldb::Slice slValue(&ssValue[0], ssValue.size());
+        leveldb::Slice slValue(ssValue.data(), ssValue.size());
 
         batch.Put(slKey, slValue);
     }
@@ -74,7 +75,7 @@ public:
         CDataStream ssKey(SER_DISK, CLIENT_VERSION);
         ssKey.reserve(DBWRAPPER_PREALLOC_KEY_SIZE);
         ssKey << key;
-        leveldb::Slice slKey(&ssKey[0], ssKey.size());
+        leveldb::Slice slKey(ssKey.data(), ssKey.size());
 
         batch.Delete(slKey);
     }
@@ -104,7 +105,7 @@ public:
         CDataStream ssKey(SER_DISK, CLIENT_VERSION);
         ssKey.reserve(GetSerializeSize(ssKey, key));
         ssKey << key;
-        leveldb::Slice slKey(&ssKey[0], ssKey.size());
+        leveldb::Slice slKey(ssKey.data(), ssKey.size());
         piter->Seek(slKey);
     }
 
@@ -119,10 +120,6 @@ public:
             return false;
         }
         return true;
-    }
-
-    unsigned int GetKeySize() {
-        return piter->key().size();
     }
 
     template<typename V> bool GetValue(V& value) {
@@ -173,7 +170,7 @@ public:
      * @param[in] fMemory     If true, use leveldb's memory environment.
      * @param[in] fWipe       If true, remove all existing data.
      */
-    CDBWrapper(const boost::filesystem::path& path, size_t nCacheSize, bool fMemory = false, bool fWipe = false);
+    CDBWrapper(const fs::path& path, size_t nCacheSize, bool fMemory = false, bool fWipe = false);
     ~CDBWrapper();
 
     template <typename K, typename V>
@@ -182,7 +179,7 @@ public:
         CDataStream ssKey(SER_DISK, CLIENT_VERSION);
         ssKey.reserve(DBWRAPPER_PREALLOC_KEY_SIZE);
         ssKey << key;
-        leveldb::Slice slKey(&ssKey[0], ssKey.size());
+        leveldb::Slice slKey(ssKey.data(), ssKey.size());
 
         std::string strValue;
         leveldb::Status status = pdb->Get(readoptions, slKey, &strValue);
@@ -215,7 +212,7 @@ public:
         CDataStream ssKey(SER_DISK, CLIENT_VERSION);
         ssKey.reserve(DBWRAPPER_PREALLOC_KEY_SIZE);
         ssKey << key;
-        leveldb::Slice slKey(&ssKey[0], ssKey.size());
+        leveldb::Slice slKey(ssKey.data(), ssKey.size());
 
         std::string strValue;
         leveldb::Status status = pdb->Get(readoptions, slKey, &strValue);

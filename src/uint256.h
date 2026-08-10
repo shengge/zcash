@@ -1,11 +1,13 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2014 The Bitcoin Core developers
+// Copyright (c) 2016-2023 The Zcash developers
 // Distributed under the MIT software license, see the accompanying
-// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+// file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 #ifndef BITCOIN_UINT256_H
 #define BITCOIN_UINT256_H
 
+#include <array>
 #include <assert.h>
 #include <cstring>
 #include <stdexcept>
@@ -75,6 +77,27 @@ public:
         return sizeof(data);
     }
 
+    uint64_t GetUint64(int pos) const
+    {
+        const uint8_t* ptr = data + pos * 8;
+        return ((uint64_t)ptr[0]) | \
+               ((uint64_t)ptr[1]) << 8 | \
+               ((uint64_t)ptr[2]) << 16 | \
+               ((uint64_t)ptr[3]) << 24 | \
+               ((uint64_t)ptr[4]) << 32 | \
+               ((uint64_t)ptr[5]) << 40 | \
+               ((uint64_t)ptr[6]) << 48 | \
+               ((uint64_t)ptr[7]) << 56;
+    }
+
+    std::array<uint8_t, WIDTH> GetRawBytes() const
+    {
+        std::array<uint8_t, WIDTH> buf = {};
+        std::memcpy(buf.data(), this->begin(), WIDTH);
+
+        return buf;
+    }
+
     template<typename Stream>
     void Serialize(Stream& s) const
     {
@@ -88,15 +111,6 @@ public:
     }
 };
 
-/** 88-bit opaque blob.
- */
-class blob88 : public base_blob<88> {
-public:
-    blob88() {}
-    blob88(const base_blob<88>& b) : base_blob<88>(b) {}
-    explicit blob88(const std::vector<unsigned char>& vch) : base_blob<88>(vch) {}
-};
-
 /** 160-bit opaque blob.
  * @note This type is called uint160 for historical reasons only. It is an opaque
  * blob of 160 bits and has no integer operations.
@@ -104,7 +118,6 @@ public:
 class uint160 : public base_blob<160> {
 public:
     uint160() {}
-    uint160(const base_blob<160>& b) : base_blob<160>(b) {}
     explicit uint160(const std::vector<unsigned char>& vch) : base_blob<160>(vch) {}
 };
 
@@ -116,8 +129,21 @@ public:
 class uint256 : public base_blob<256> {
 public:
     uint256() {}
-    uint256(const base_blob<256>& b) : base_blob<256>(b) {}
     explicit uint256(const std::vector<unsigned char>& vch) : base_blob<256>(vch) {}
+
+    static uint256 FromRawBytes(std::array<uint8_t, 32> bytes)
+    {
+        uint256 buf;
+        std::memcpy(buf.begin(), bytes.data(), 32);
+        return buf;
+    }
+
+    std::array<uint8_t, 32> ToRawBytes() const
+    {
+        std::array<uint8_t, 32> buf;
+        std::memcpy(buf.data(), begin(), 32);
+        return buf;
+    }
 
     /** A cheap hash function that just returns 64 bits from the result, it can be
      * used when the contents are considered uniformly random. It is not appropriate
@@ -131,11 +157,6 @@ public:
         memcpy((void*)&result, (void*)data, 8);
         return result;
     }
-
-    /** A more secure, salted hash function.
-     * @note This hash is not stable between little and big endian.
-     */
-    uint64_t GetHash(const uint256& salt) const;
 };
 
 /* uint256 from const char *.
@@ -158,5 +179,10 @@ inline uint256 uint256S(const std::string& str)
     rv.SetHex(str);
     return rv;
 }
+
+// Defined here so we have access to it in both primitives/transaction.h and protocol.h.
+/* The placeholder value used for the auth digest of pre-v5 transactions. */
+static const uint256 LEGACY_TX_AUTH_DIGEST =
+    uint256S("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
 
 #endif // BITCOIN_UINT256_H

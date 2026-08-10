@@ -1,15 +1,15 @@
 // Copyright (c) 2011-2014 The Bitcoin Core developers
+// Copyright (c) 2016-2023 The Zcash developers
 // Distributed under the MIT software license, see the accompanying
-// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+// file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
-#include "util.h"
+#include "util/system.h"
 
 #include "clientversion.h"
 #include "primitives/transaction.h"
-#include "random.h"
 #include "sync.h"
-#include "utilstrencodings.h"
-#include "utilmoneystr.h"
+#include "util/strencodings.h"
+#include "util/moneystr.h"
 #include "test/test_bitcoin.h"
 
 #include <stdint.h>
@@ -234,7 +234,7 @@ BOOST_AUTO_TEST_CASE(util_IsHex)
 
 BOOST_AUTO_TEST_CASE(util_seed_insecure_rand)
 {
-    seed_insecure_rand(true);
+    SeedInsecureRand(true);
     for (int mod=2;mod<11;mod++)
     {
         int mask = 1;
@@ -248,7 +248,7 @@ BOOST_AUTO_TEST_CASE(util_seed_insecure_rand)
         for (int i = 0; i < 10000; i++) {
             uint32_t rval;
             do{
-                rval=insecure_rand()&mask;
+                rval=InsecureRand32()&mask;
             }while(rval>=(uint32_t)mod);
             count += rval==0;
         }
@@ -312,7 +312,7 @@ BOOST_AUTO_TEST_CASE(test_ParseInt32)
     BOOST_CHECK(ParseInt32("1234", &n) && n == 1234);
     BOOST_CHECK(ParseInt32("01234", &n) && n == 1234); // no octal
     BOOST_CHECK(ParseInt32("2147483647", &n) && n == 2147483647);
-    BOOST_CHECK(ParseInt32("-2147483648", &n) && n == -2147483648);
+    BOOST_CHECK(ParseInt32("-2147483648", &n) && n == (-2147483647 - 1)); // (-2147483647 - 1) equals INT_MIN
     BOOST_CHECK(ParseInt32("-1234", &n) && n == -1234);
     // Invalid values
     BOOST_CHECK(!ParseInt32("", &n));
@@ -420,6 +420,11 @@ BOOST_AUTO_TEST_CASE(test_FormatSubVersion)
     BOOST_CHECK_EQUAL(FormatSubVersion("Test", 99950, comments),  std::string("/Test:0.9.99(comment1)/"));
     BOOST_CHECK_EQUAL(FormatSubVersion("Test", 99900, comments2), std::string("/Test:0.9.99-beta1(comment1; Comment2; .,_?@; )/"));
     BOOST_CHECK_EQUAL(FormatSubVersion("Test", 99950, comments2), std::string("/Test:0.9.99(comment1; Comment2; .,_?@; )/"));
+
+    // bug https://github.com/zcash/zcash/issues/4375
+    BOOST_CHECK_EQUAL(SanitizeString(std::string("MagicBean:2.1.1-1")), "MagicBean:2.1.11");
+    // fixed by adding new rule https://github.com/zcash/zcash/pull/4444
+    BOOST_CHECK_EQUAL(SanitizeString(std::string("MagicBean:2.1.1-1"), SAFE_CHARS_SUBVERSION), "MagicBean:2.1.1-1");
 }
 
 BOOST_AUTO_TEST_CASE(test_ParseFixedPoint)
@@ -485,6 +490,135 @@ BOOST_AUTO_TEST_CASE(test_ParseFixedPoint)
     BOOST_CHECK(!ParseFixedPoint("1.1e", 8, &amount));
     BOOST_CHECK(!ParseFixedPoint("1.1e-", 8, &amount));
     BOOST_CHECK(!ParseFixedPoint("1.", 8, &amount));
+}
+
+BOOST_AUTO_TEST_CASE(test_ParseArbitraryInt)
+{
+    // Negation not allowed.
+    BOOST_CHECK(!ParseArbitraryInt("-1"));
+
+    // no legal digits
+    BOOST_CHECK(!ParseArbitraryInt(""));
+    BOOST_CHECK(!ParseArbitraryInt(" "));
+
+    // Hex not allowed (only decimal).
+    BOOST_CHECK(!ParseArbitraryInt("ab"));
+    BOOST_CHECK(!ParseArbitraryInt("0xab"));
+
+    // Decimal point not allowed.
+    BOOST_CHECK(!ParseArbitraryInt("1."));
+
+    std::optional<std::vector<unsigned char>> v;
+
+    // simple success case
+    v = ParseArbitraryInt("1");
+    BOOST_CHECK(v.has_value());
+    BOOST_CHECK_EQUAL(v->size(), 1);
+    BOOST_CHECK_EQUAL((*v)[0], 1);
+
+    // Leading and trailing whitespace (spaces and tabs) is allowed.
+    v = ParseArbitraryInt(" 1");
+    BOOST_CHECK(v.has_value());
+    BOOST_CHECK_EQUAL(v->size(), 1);
+    BOOST_CHECK_EQUAL((*v)[0], 1);
+    v = ParseArbitraryInt("2 ");
+    BOOST_CHECK(v.has_value());
+    BOOST_CHECK_EQUAL(v->size(), 1);
+    BOOST_CHECK_EQUAL((*v)[0], 2);
+    v = ParseArbitraryInt(" \t3 ");
+    BOOST_CHECK(v.has_value());
+    BOOST_CHECK_EQUAL(v->size(), 1);
+    BOOST_CHECK_EQUAL((*v)[0], 3);
+
+    // Leading zeros have no effect, does not mean octal
+    v = ParseArbitraryInt("010\t");
+    BOOST_CHECK(v.has_value());
+    BOOST_CHECK_EQUAL(v->size(), 1);
+    BOOST_CHECK_EQUAL((*v)[0], 10);
+
+    v = ParseArbitraryInt("                 255\t");
+    BOOST_CHECK(v.has_value());
+    BOOST_CHECK_EQUAL(v->size(), 1);
+    BOOST_CHECK_EQUAL((*v)[0], 255);
+
+    v = ParseArbitraryInt("\t 256");
+    BOOST_CHECK(v.has_value());
+    BOOST_CHECK_EQUAL(v->size(), 2);
+    BOOST_CHECK_EQUAL((*v)[0], 0);
+    BOOST_CHECK_EQUAL((*v)[1], 1);
+
+    v = ParseArbitraryInt("257 \t");
+    BOOST_CHECK(v.has_value());
+    BOOST_CHECK_EQUAL(v->size(), 2);
+    BOOST_CHECK_EQUAL((*v)[0], 1);
+    BOOST_CHECK_EQUAL((*v)[1], 1);
+
+    v = ParseArbitraryInt("65535");
+    BOOST_CHECK(v.has_value());
+    BOOST_CHECK_EQUAL(v->size(), 2);
+    BOOST_CHECK_EQUAL((*v)[0], 255);
+    BOOST_CHECK_EQUAL((*v)[1], 255);
+
+    v = ParseArbitraryInt("65536");
+    BOOST_CHECK(v.has_value());
+    BOOST_CHECK_EQUAL(v->size(), 3);
+    BOOST_CHECK_EQUAL((*v)[0], 0);
+    BOOST_CHECK_EQUAL((*v)[1], 0);
+    BOOST_CHECK_EQUAL((*v)[2], 1);
+
+    // This decimal string came from:
+    // $ echo 16i 102030405060708090A0B0C0D0E0F0F1F2F3F4F5F6F7 p | dc
+    v = ParseArbitraryInt("6033354224708459019450009057293028077350189222196983");
+    BOOST_CHECK(v.has_value());
+    BOOST_CHECK_EQUAL(v->size(), 22);
+    BOOST_CHECK_EQUAL((*v)[0], 0xf7);
+    BOOST_CHECK_EQUAL((*v)[1], 0xf6);
+    BOOST_CHECK_EQUAL((*v)[2], 0xf5);
+    BOOST_CHECK_EQUAL((*v)[3], 0xf4);
+    BOOST_CHECK_EQUAL((*v)[4], 0xf3);
+    BOOST_CHECK_EQUAL((*v)[5], 0xf2);
+    BOOST_CHECK_EQUAL((*v)[6], 0xf1);
+    BOOST_CHECK_EQUAL((*v)[7], 0xf0);
+    BOOST_CHECK_EQUAL((*v)[8], 0xe0);
+    BOOST_CHECK_EQUAL((*v)[9], 0xd0);
+    BOOST_CHECK_EQUAL((*v)[10], 0xc0);
+    BOOST_CHECK_EQUAL((*v)[11], 0xb0);
+    BOOST_CHECK_EQUAL((*v)[12], 0xa0);
+    BOOST_CHECK_EQUAL((*v)[13], 0x90);
+    BOOST_CHECK_EQUAL((*v)[14], 0x80);
+    BOOST_CHECK_EQUAL((*v)[15], 0x70);
+    BOOST_CHECK_EQUAL((*v)[16], 0x60);
+    BOOST_CHECK_EQUAL((*v)[17], 0x50);
+    BOOST_CHECK_EQUAL((*v)[18], 0x40);
+    BOOST_CHECK_EQUAL((*v)[19], 0x30);
+    BOOST_CHECK_EQUAL((*v)[20], 0x20);
+    BOOST_CHECK_EQUAL((*v)[21], 0x10);
+}
+
+BOOST_AUTO_TEST_CASE(test_ArbitraryIntStr)
+{
+    BOOST_CHECK_EQUAL(ArbitraryIntStr({}), "0");
+    BOOST_CHECK_EQUAL(ArbitraryIntStr({0}), "0");
+    BOOST_CHECK_EQUAL(ArbitraryIntStr({0, 0}), "0");
+    BOOST_CHECK_EQUAL(ArbitraryIntStr({0, 0, 0}), "0");
+    BOOST_CHECK_EQUAL(ArbitraryIntStr({0, 0, 0, 0}), "0");
+
+    BOOST_CHECK_EQUAL(ArbitraryIntStr({1}), "1");
+    BOOST_CHECK_EQUAL(ArbitraryIntStr({2}), "2");
+    BOOST_CHECK_EQUAL(ArbitraryIntStr({10}), "10");
+    BOOST_CHECK_EQUAL(ArbitraryIntStr({100}), "100");
+
+    BOOST_CHECK_EQUAL(ArbitraryIntStr({0xff}), "255");
+    BOOST_CHECK_EQUAL(ArbitraryIntStr({0x00, 0x01}), "256");
+    BOOST_CHECK_EQUAL(ArbitraryIntStr({0xff, 0x01}), "511");
+    BOOST_CHECK_EQUAL(ArbitraryIntStr({0x00, 0x02}), "512");
+
+    BOOST_CHECK_EQUAL(
+        ArbitraryIntStr({0xff, 0xff, 0xff, 0xff}),
+        "4294967295");
+    BOOST_CHECK_EQUAL(
+        ArbitraryIntStr({0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}),
+        "309485009821345068724781055");
 }
 
 BOOST_AUTO_TEST_SUITE_END()

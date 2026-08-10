@@ -1,28 +1,29 @@
 // Copyright (c) 2013 The Bitcoin Core developers
+// Copyright (c) 2016-2023 The Zcash developers
 // Distributed under the MIT software license, see the accompanying
-// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+// file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 #include "consensus/upgrades.h"
 #include "consensus/validation.h"
-#include "data/sighash.json.h"
+#include "test/data/sighash.json.h"
 #include "main.h"
-#include "random.h"
 #include "script/interpreter.h"
 #include "script/script.h"
 #include "serialize.h"
 #include "test/test_bitcoin.h"
-#include "util.h"
+#include "test/test_util.h"
+#include "util/system.h"
+#include "util/test.h"
 #include "version.h"
-#include "sodium.h"
 
 #include <iostream>
 #include <random>
 
 #include <boost/test/unit_test.hpp>
 
-#include <univalue.h>
+#include <rust/ed25519.h>
 
-extern UniValue read_json(const std::string& jsondata);
+#include <univalue.h>
 
 // Old script.cpp SignatureHash function
 uint256 static SignatureHashOld(CScript scriptCode, const CTransaction& txTo, unsigned int nIn, int nHashType)
@@ -30,7 +31,7 @@ uint256 static SignatureHashOld(CScript scriptCode, const CTransaction& txTo, un
     static const uint256 one(uint256S("0000000000000000000000000000000000000000000000000000000000000001"));
     if (nIn >= txTo.vin.size())
     {
-        printf("ERROR: SignatureHash(): nIn=%d out of range\n", nIn);
+        printf("ERROR: SignatureHash(): nIn=%u out of range\n", nIn);
         return one;
     }
     CMutableTransaction txTmp(txTo);
@@ -57,7 +58,7 @@ uint256 static SignatureHashOld(CScript scriptCode, const CTransaction& txTo, un
         unsigned int nOut = nIn;
         if (nOut >= txTmp.vout.size())
         {
-            printf("ERROR: SignatureHash(): nOut=%d out of range\n", nOut);
+            printf("ERROR: SignatureHash(): nOut=%u out of range\n", nOut);
             return one;
         }
         txTmp.vout.resize(nOut+1);
@@ -78,7 +79,7 @@ uint256 static SignatureHashOld(CScript scriptCode, const CTransaction& txTo, un
     }
 
     // Blank out the joinsplit signature.
-    memset(&txTmp.joinSplitSig[0], 0, txTmp.joinSplitSig.size());
+    txTmp.joinSplitSig.bytes.fill(0);
 
     // Serialize and hash
     CHashWriter ss(SER_GETHASH, 0);
@@ -89,13 +90,13 @@ uint256 static SignatureHashOld(CScript scriptCode, const CTransaction& txTo, un
 void static RandomScript(CScript &script) {
     static const opcodetype oplist[] = {OP_FALSE, OP_1, OP_2, OP_3, OP_CHECKSIG, OP_IF, OP_VERIF, OP_RETURN};
     script = CScript();
-    int ops = (insecure_rand() % 10);
+    int ops = (InsecureRandRange(10));
     for (int i=0; i<ops; i++)
-        script << oplist[insecure_rand() % (sizeof(oplist)/sizeof(oplist[0]))];
+        script << oplist[InsecureRandRange(sizeof(oplist)/sizeof(oplist[0]))];
 }
 
 // Overwinter tx version numbers are selected randomly from current version range.
-// http://en.cppreference.com/w/cpp/numeric/random/uniform_int_distribution
+// https://en.cppreference.com/w/cpp/numeric/random/uniform_int_distribution
 // https://stackoverflow.com/a/19728404
 std::random_device rd;
 std::mt19937 rng(rd());
@@ -107,116 +108,98 @@ std::uniform_int_distribution<int> sapling_version_dist(
     CTransaction::SAPLING_MAX_CURRENT_VERSION);
 
 void static RandomTransaction(CMutableTransaction &tx, bool fSingle, uint32_t consensusBranchId) {
-    tx.fOverwintered = insecure_rand() % 2;
+    tx.fOverwintered = InsecureRandBool();
     if (tx.fOverwintered) {
-        if (insecure_rand() % 2) {
+        if (InsecureRandBool()) {
             tx.nVersionGroupId = SAPLING_VERSION_GROUP_ID;
             tx.nVersion = sapling_version_dist(rng);
         } else {
             tx.nVersionGroupId = OVERWINTER_VERSION_GROUP_ID;
             tx.nVersion = overwinter_version_dist(rng);
         }
-        tx.nExpiryHeight = (insecure_rand() % 2) ? insecure_rand() : 0;
+        tx.nExpiryHeight = (InsecureRandBool()) ? InsecureRandRange(TX_EXPIRY_HEIGHT_THRESHOLD) : 0;
     } else {
-        tx.nVersion = insecure_rand() & 0x7FFFFFFF;
+        tx.nVersion = InsecureRandBits(31);
     }
     tx.vin.clear();
     tx.vout.clear();
-    tx.vShieldedSpend.clear();
-    tx.vShieldedOutput.clear();
-    tx.vjoinsplit.clear();
-    tx.nLockTime = (insecure_rand() % 2) ? insecure_rand() : 0;
-    int ins = (insecure_rand() % 4) + 1;
-    int outs = fSingle ? ins : (insecure_rand() % 4) + 1;
-    int shielded_spends = (insecure_rand() % 4) + 1;
-    int shielded_outs = (insecure_rand() % 4) + 1;
-    int joinsplits = (insecure_rand() % 4);
+    tx.vJoinSplit.clear();
+    tx.nLockTime = (InsecureRandBool()) ? InsecureRand32() : 0;
+    int ins = (InsecureRandBits(2)) + 1;
+    int outs = fSingle ? ins : (InsecureRandBits(2)) + 1;
+    int shielded_spends = (InsecureRandBits(2)) + 1;
+    int shielded_outs = (InsecureRandBits(2)) + 1;
+    int joinsplits = (InsecureRandBits(2));
     for (int in = 0; in < ins; in++) {
         tx.vin.push_back(CTxIn());
         CTxIn &txin = tx.vin.back();
-        txin.prevout.hash = GetRandHash();
-        txin.prevout.n = insecure_rand() % 4;
+        txin.prevout.hash = InsecureRand256();
+        txin.prevout.n = InsecureRandBits(2);
         RandomScript(txin.scriptSig);
-        txin.nSequence = (insecure_rand() % 2) ? insecure_rand() : (unsigned int)-1;
+        txin.nSequence = (InsecureRandBool()) ? InsecureRand32() : (unsigned int)-1;
     }
     for (int out = 0; out < outs; out++) {
         tx.vout.push_back(CTxOut());
         CTxOut &txout = tx.vout.back();
-        txout.nValue = insecure_rand() % 100000000;
+        txout.nValue = InsecureRandRange(100000000);
         RandomScript(txout.scriptPubKey);
     }
     if (tx.nVersionGroupId == SAPLING_VERSION_GROUP_ID) {
-        tx.valueBalance = insecure_rand() % 100000000;
-        for (int spend = 0; spend < shielded_spends; spend++) {
-            SpendDescription sdesc;
-            sdesc.cv = GetRandHash();
-            sdesc.anchor = GetRandHash();
-            sdesc.nullifier = GetRandHash();
-            sdesc.rk = GetRandHash();
-            randombytes_buf(sdesc.zkproof.begin(), sdesc.zkproof.size());
-            tx.vShieldedSpend.push_back(sdesc);
-        }
-        for (int out = 0; out < shielded_outs; out++) {
-            OutputDescription odesc;
-            odesc.cv = GetRandHash();
-            odesc.cm = GetRandHash();
-            odesc.ephemeralKey = GetRandHash();
-            randombytes_buf(odesc.encCiphertext.begin(), odesc.encCiphertext.size());
-            randombytes_buf(odesc.outCiphertext.begin(), odesc.outCiphertext.size());
-            randombytes_buf(odesc.zkproof.begin(), odesc.zkproof.size());
-            tx.vShieldedOutput.push_back(odesc);
-        }
+        tx.saplingBundle = sapling::test_only_invalid_bundle(
+            shielded_spends,
+            shielded_outs,
+            InsecureRandRange(100000000));
     }
-    if (tx.nVersion >= 2) {
+    // We have removed pre-Sapling Sprout support.
+    if (tx.fOverwintered && tx.nVersion >= SAPLING_TX_VERSION) {
         for (int js = 0; js < joinsplits; js++) {
             JSDescription jsdesc;
-            if (insecure_rand() % 2 == 0) {
-                jsdesc.vpub_old = insecure_rand() % 100000000;
+            if (InsecureRandBool() == 0) {
+                jsdesc.vpub_old = InsecureRandRange(100000000);
             } else {
-                jsdesc.vpub_new = insecure_rand() % 100000000;
+                jsdesc.vpub_new = InsecureRandRange(100000000);
             }
 
-            jsdesc.anchor = GetRandHash();
-            jsdesc.nullifiers[0] = GetRandHash();
-            jsdesc.nullifiers[1] = GetRandHash();
-            jsdesc.ephemeralKey = GetRandHash();
-            jsdesc.randomSeed = GetRandHash();
-            randombytes_buf(jsdesc.ciphertexts[0].begin(), jsdesc.ciphertexts[0].size());
-            randombytes_buf(jsdesc.ciphertexts[1].begin(), jsdesc.ciphertexts[1].size());
-            if (tx.fOverwintered && tx.nVersion >= SAPLING_TX_VERSION) {
+            jsdesc.anchor = InsecureRand256();
+            jsdesc.nullifiers[0] = InsecureRand256();
+            jsdesc.nullifiers[1] = InsecureRand256();
+            jsdesc.ephemeralKey = InsecureRand256();
+            jsdesc.randomSeed = InsecureRand256();
+            GetRandBytes(jsdesc.ciphertexts[0].begin(), jsdesc.ciphertexts[0].size());
+            GetRandBytes(jsdesc.ciphertexts[1].begin(), jsdesc.ciphertexts[1].size());
+            {
                 libzcash::GrothProof zkproof;
-                randombytes_buf(zkproof.begin(), zkproof.size());
+                GetRandBytes(zkproof.begin(), zkproof.size());
                 jsdesc.proof = zkproof;
-            } else {
-                jsdesc.proof = libzcash::PHGRProof::random_invalid();
             }
-            jsdesc.macs[0] = GetRandHash();
-            jsdesc.macs[1] = GetRandHash();
+            jsdesc.macs[0] = InsecureRand256();
+            jsdesc.macs[1] = InsecureRand256();
 
-            tx.vjoinsplit.push_back(jsdesc);
+            tx.vJoinSplit.push_back(jsdesc);
         }
 
-        unsigned char joinSplitPrivKey[crypto_sign_SECRETKEYBYTES];
-        crypto_sign_keypair(tx.joinSplitPubKey.begin(), joinSplitPrivKey);
+        ed25519::SigningKey joinSplitPrivKey;
+        ed25519::generate_keypair(joinSplitPrivKey, tx.joinSplitPubKey);
 
         // Empty output script.
         CScript scriptCode;
         CTransaction signTx(tx);
-        uint256 dataToBeSigned = SignatureHash(scriptCode, signTx, NOT_AN_INPUT, SIGHASH_ALL, 0, consensusBranchId);
+        PrecomputedTransactionData txdata(signTx, {});
+        uint256 dataToBeSigned = SignatureHash(scriptCode, signTx, NOT_AN_INPUT, SIGHASH_ALL, 0, consensusBranchId, txdata);
 
-        assert(crypto_sign_detached(&tx.joinSplitSig[0], NULL,
-                                    dataToBeSigned.begin(), 32,
-                                    joinSplitPrivKey
-                                    ) == 0);
+        ed25519::sign(
+            joinSplitPrivKey,
+            {dataToBeSigned.begin(), 32},
+            tx.joinSplitSig);
     }
 }
 
-BOOST_FIXTURE_TEST_SUITE(sighash_tests, JoinSplitTestingSetup)
+BOOST_FIXTURE_TEST_SUITE(sighash_tests, BasicTestingSetup)
 
 BOOST_AUTO_TEST_CASE(sighash_test)
 {
     uint32_t overwinterBranchId = NetworkUpgradeInfo[Consensus::UPGRADE_OVERWINTER].nBranchId;
-    seed_insecure_rand(false);
+    SeedInsecureRand(false);
 
     #if defined(PRINT_SIGHASH_JSON)
     std::cout << "[\n";
@@ -228,17 +211,20 @@ BOOST_AUTO_TEST_CASE(sighash_test)
     nRandomTests = 500;
     #endif
     for (int i=0; i<nRandomTests; i++) {
-        int nHashType = insecure_rand();
-        uint32_t consensusBranchId = NetworkUpgradeInfo[insecure_rand() % Consensus::MAX_NETWORK_UPGRADES].nBranchId;
+        int nHashType = InsecureRand32();
+        // Exclude ZFUTURE as its branch ID can't be represented as a JSON int32
+        uint32_t consensusBranchId = NetworkUpgradeInfo[InsecureRandRange(Consensus::MAX_NETWORK_UPGRADES - 1)].nBranchId;
         CMutableTransaction txTo;
         RandomTransaction(txTo, (nHashType & 0x1f) == SIGHASH_SINGLE, consensusBranchId);
         CScript scriptCode;
         RandomScript(scriptCode);
-        int nIn = insecure_rand() % txTo.vin.size();
+        int nIn = InsecureRandRange(txTo.vin.size());
+        // We don't generate v5 transactions here; we have separate ZIP 244 test vectors.
+        const PrecomputedTransactionData txdata(txTo, {});
 
         uint256 sh, sho;
         sho = SignatureHashOld(scriptCode, txTo, nIn, nHashType);
-        sh = SignatureHash(scriptCode, txTo, nIn, nHashType, 0, consensusBranchId);
+        sh = SignatureHash(scriptCode, txTo, nIn, nHashType, 0, consensusBranchId, txdata);
         #if defined(PRINT_SIGHASH_JSON)
         CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
         ss << txTo;
@@ -292,7 +278,8 @@ BOOST_AUTO_TEST_CASE(sighash_from_data)
           raw_script = test[1].get_str();
           nIn = test[2].get_int();
           nHashType = test[3].get_int();
-          consensusBranchId = test[4].get_int();
+          // JSON integers are signed, so parse uint32 as int64
+          consensusBranchId = test[4].get_int64();
           sigHashHex = test[5].get_str();
 
           uint256 sh;
@@ -324,12 +311,17 @@ BOOST_AUTO_TEST_CASE(sighash_from_data)
 
           std::vector<unsigned char> raw = ParseHex(raw_script);
           scriptCode.insert(scriptCode.end(), raw.begin(), raw.end());
+        } catch (const std::exception& ex) {
+          BOOST_ERROR("Bad test, couldn't deserialize data: " << strTest << ": " << ex.what());
+          continue;
         } catch (...) {
           BOOST_ERROR("Bad test, couldn't deserialize data: " << strTest);
           continue;
         }
 
-        sh = SignatureHash(scriptCode, tx, nIn, nHashType, 0, consensusBranchId);
+        // These test vectors do not include v5 transactions.
+        const PrecomputedTransactionData txdata(tx, {});
+        sh = SignatureHash(scriptCode, tx, nIn, nHashType, 0, consensusBranchId, txdata);
         BOOST_CHECK_MESSAGE(sh.GetHex() == sigHashHex, strTest);
     }
 }

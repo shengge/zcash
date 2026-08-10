@@ -1,8 +1,8 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2014 The Bitcoin Core developers
-// Copyright (c) 2017 The Zcash developers
+// Copyright (c) 2017-2023 The Zcash developers
 // Distributed under the MIT software license, see the accompanying
-// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+// file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 #ifndef BITCOIN_PUBKEY_H
 #define BITCOIN_PUBKEY_H
@@ -22,6 +22,7 @@ class CKeyID : public uint160
 public:
     CKeyID() : uint160() {}
     CKeyID(const uint160& in) : uint160(in) {}
+    explicit CKeyID(const std::vector<unsigned char>& vch) : uint160(vch) {}
 };
 
 typedef uint256 ChainCode;
@@ -33,10 +34,10 @@ public:
     /**
      * secp256k1:
      */
-    static const unsigned int PUBLIC_KEY_SIZE             = 65;
-    static const unsigned int COMPRESSED_PUBLIC_KEY_SIZE  = 33;
-    static const unsigned int SIGNATURE_SIZE              = 72;
-    static const unsigned int COMPACT_SIGNATURE_SIZE      = 65;
+    static constexpr unsigned int PUBLIC_KEY_SIZE             = 65;
+    static constexpr unsigned int COMPRESSED_PUBLIC_KEY_SIZE  = 33;
+    static constexpr unsigned int SIGNATURE_SIZE              = 72;
+    static constexpr unsigned int COMPACT_SIGNATURE_SIZE      = 65;
     /**
      * see www.keylength.com
      * script supports up to 75 for single byte push
@@ -70,6 +71,11 @@ private:
     }
 
 public:
+
+    bool static ValidSize(const std::vector<unsigned char> &vch) {
+      return vch.size() > 0 && GetLen(vch[0]) == vch.size();
+    }
+
     //! Construct an invalid public key.
     CPubKey()
     {
@@ -95,9 +101,9 @@ public:
     }
 
     //! Construct a public key from a byte vector.
-    CPubKey(const std::vector<unsigned char>& vch)
+    CPubKey(const std::vector<unsigned char>& _vch)
     {
-        Set(vch.begin(), vch.end());
+        Set(_vch.begin(), _vch.end());
     }
 
     //! Simple read-only vector-like interface to the pubkey data.
@@ -159,7 +165,7 @@ public:
 
     /*
      * Check syntactic correctness.
-     * 
+     *
      * Note that this is consensus critical as CheckSig() calls it!
      */
     bool IsValid() const
@@ -197,6 +203,57 @@ public:
     bool Derive(CPubKey& pubkeyChild, ChainCode &ccChild, unsigned int nChild, const ChainCode& cc) const;
 };
 
+class CChainablePubKey {
+private:
+    ChainCode chaincode;
+    CPubKey pubkey;
+
+    CChainablePubKey() {}
+    CChainablePubKey(ChainCode chaincode, CPubKey pubkey): chaincode(chaincode), pubkey(pubkey) {}
+public:
+    static std::optional<CChainablePubKey> FromParts(ChainCode chaincode, CPubKey pubkey);
+
+    const ChainCode& GetChainCode() const {
+        return chaincode;
+    }
+
+    const CPubKey& GetPubKey() const {
+        return pubkey;
+    }
+
+    std::optional<CChainablePubKey> Derive(unsigned int nChild) const;
+
+    ADD_SERIALIZE_METHODS;
+
+    template <typename Stream, typename Operation>
+    inline void SerializationOp(Stream& s, Operation ser_action) {
+        READWRITE(chaincode);
+        if (ser_action.ForRead()) {
+            std::array<uint8_t, CPubKey::COMPRESSED_PUBLIC_KEY_SIZE> pubkeyBytes;
+            READWRITE(pubkeyBytes);
+            pubkey = CPubKey(pubkeyBytes.begin(), pubkeyBytes.end());
+            assert(pubkey.IsCompressed());
+        } else {
+            assert(pubkey.size() == CPubKey::COMPRESSED_PUBLIC_KEY_SIZE);
+            std::array<uint8_t, CPubKey::COMPRESSED_PUBLIC_KEY_SIZE> pubkeyBytes;
+            std::copy(pubkey.begin(), pubkey.end(), pubkeyBytes.begin());
+            READWRITE(pubkeyBytes);
+        }
+    }
+
+    template <typename Stream>
+    static CChainablePubKey Read(Stream& stream) {
+        CChainablePubKey key;
+        stream >> key;
+        return key;
+    }
+
+    friend bool operator==(const CChainablePubKey &a, const CChainablePubKey &b)
+    {
+        return a.chaincode == b.chaincode && a.pubkey == b.pubkey;
+    }
+};
+
 struct CExtPubKey {
     unsigned char nDepth;
     unsigned char vchFingerprint[4];
@@ -206,13 +263,20 @@ struct CExtPubKey {
 
     friend bool operator==(const CExtPubKey &a, const CExtPubKey &b)
     {
-        return a.nDepth == b.nDepth && memcmp(&a.vchFingerprint[0], &b.vchFingerprint[0], 4) == 0 && a.nChild == b.nChild &&
-               a.chaincode == b.chaincode && a.pubkey == b.pubkey;
+        return a.nDepth == b.nDepth &&
+            memcmp(&a.vchFingerprint[0], &b.vchFingerprint[0], sizeof(vchFingerprint)) == 0 &&
+            a.nChild == b.nChild &&
+            a.chaincode == b.chaincode &&
+            a.pubkey == b.pubkey;
     }
 
     void Encode(unsigned char code[BIP32_EXTKEY_SIZE]) const;
     void Decode(const unsigned char code[BIP32_EXTKEY_SIZE]);
     bool Derive(CExtPubKey& out, unsigned int nChild) const;
+
+    std::optional<CChainablePubKey> ToChainablePubKey() const {
+        return CChainablePubKey::FromParts(chaincode, pubkey);
+    }
 
     void Serialize(CSizeComputer& s) const
     {
@@ -238,17 +302,6 @@ struct CExtPubKey {
         s.read((char *)&code[0], len);
         Decode(code);
     }
-};
-
-/** Users of this module must hold an ECCVerifyHandle. The constructor and
- *  destructor of these are not allowed to run in parallel, though. */
-class ECCVerifyHandle
-{
-    static int refcount;
-
-public:
-    ECCVerifyHandle();
-    ~ECCVerifyHandle();
 };
 
 #endif // BITCOIN_PUBKEY_H

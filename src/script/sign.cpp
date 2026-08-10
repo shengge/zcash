@@ -1,23 +1,24 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2014 The Bitcoin Core developers
+// Copyright (c) 2016-2023 The Zcash developers
 // Distributed under the MIT software license, see the accompanying
-// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+// file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 #include "script/sign.h"
 
-#include "primitives/transaction.h"
 #include "key.h"
 #include "keystore.h"
+#include "policy/policy.h"
+#include "primitives/transaction.h"
 #include "script/standard.h"
 #include "uint256.h"
 
-#include <boost/foreach.hpp>
 
 using namespace std;
 
 typedef std::vector<unsigned char> valtype;
 
-TransactionSignatureCreator::TransactionSignatureCreator(const CKeyStore* keystoreIn, const CTransaction* txToIn, unsigned int nInIn, const CAmount& amountIn, int nHashTypeIn) : BaseSignatureCreator(keystoreIn), txTo(txToIn), nIn(nInIn), nHashType(nHashTypeIn), amount(amountIn), checker(txTo, nIn, amountIn) {}
+TransactionSignatureCreator::TransactionSignatureCreator(const CKeyStore* keystoreIn, const CTransaction* txToIn, const PrecomputedTransactionData& txToDataIn, unsigned int nInIn, const CAmount& amountIn, int nHashTypeIn) : BaseSignatureCreator(keystoreIn), txTo(txToIn), txToData(txToDataIn), nIn(nInIn), nHashType(nHashTypeIn), amount(amountIn), checker(txTo, txToDataIn, nIn, amountIn) {}
 
 bool TransactionSignatureCreator::CreateSig(std::vector<unsigned char>& vchSig, const CKeyID& address, const CScript& scriptCode, uint32_t consensusBranchId) const
 {
@@ -27,7 +28,7 @@ bool TransactionSignatureCreator::CreateSig(std::vector<unsigned char>& vchSig, 
 
     uint256 hash;
     try {
-        hash = SignatureHash(scriptCode, *txTo, nIn, nHashType, amount, consensusBranchId);
+        hash = SignatureHash(scriptCode, *txTo, nIn, nHashType, amount, consensusBranchId, txToData);
     } catch (logic_error ex) {
         return false;
     }
@@ -117,7 +118,7 @@ static bool SignStep(const BaseSignatureCreator& creator, const CScript& scriptP
 static CScript PushAll(const vector<valtype>& values)
 {
     CScript result;
-    BOOST_FOREACH(const valtype& v, values) {
+    for (const valtype& v : values) {
         if (v.size() == 0) {
             result << OP_0;
         } else if (v.size() == 1 && v[0] >= 1 && v[0] <= 16) {
@@ -172,6 +173,7 @@ bool SignSignature(
     const CKeyStore &keystore,
     const CScript& fromPubKey,
     CMutableTransaction& txTo,
+    const PrecomputedTransactionData& txToData,
     unsigned int nIn,
     const CAmount& amount,
     int nHashType,
@@ -180,7 +182,7 @@ bool SignSignature(
     assert(nIn < txTo.vin.size());
 
     CTransaction txToConst(txTo);
-    TransactionSignatureCreator creator(&keystore, &txToConst, nIn, amount, nHashType);
+    TransactionSignatureCreator creator(&keystore, &txToConst, txToData, nIn, amount, nHashType);
 
     SignatureData sigdata;
     bool ret = ProduceSignature(creator, fromPubKey, sigdata, consensusBranchId);
@@ -192,6 +194,7 @@ bool SignSignature(
     const CKeyStore &keystore,
     const CTransaction& txFrom,
     CMutableTransaction& txTo,
+    const PrecomputedTransactionData& txToData,
     unsigned int nIn,
     int nHashType,
     uint32_t consensusBranchId)
@@ -201,7 +204,7 @@ bool SignSignature(
     assert(txin.prevout.n < txFrom.vout.size());
     const CTxOut& txout = txFrom.vout[txin.prevout.n];
 
-    return SignSignature(keystore, txout.scriptPubKey, txTo, nIn, txout.nValue, nHashType, consensusBranchId);
+    return SignSignature(keystore, txout.scriptPubKey, txTo, txToData, nIn, txout.nValue, nHashType, consensusBranchId);
 }
 
 static vector<valtype> CombineMultisig(const CScript& scriptPubKey, const BaseSignatureChecker& checker,
@@ -210,12 +213,12 @@ static vector<valtype> CombineMultisig(const CScript& scriptPubKey, const BaseSi
 {
     // Combine all the signatures we've got:
     set<valtype> allsigs;
-    BOOST_FOREACH(const valtype& v, sigs1)
+    for (const valtype& v : sigs1)
     {
         if (!v.empty())
             allsigs.insert(v);
     }
-    BOOST_FOREACH(const valtype& v, sigs2)
+    for (const valtype& v : sigs2)
     {
         if (!v.empty())
             allsigs.insert(v);
@@ -226,7 +229,7 @@ static vector<valtype> CombineMultisig(const CScript& scriptPubKey, const BaseSi
     unsigned int nSigsRequired = vSolutions.front()[0];
     unsigned int nPubKeys = vSolutions.size()-2;
     map<valtype, valtype> sigs;
-    BOOST_FOREACH(const valtype& sig, allsigs)
+    for (const valtype& sig : allsigs)
     {
         for (unsigned int i = 0; i < nPubKeys; i++)
         {

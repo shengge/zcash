@@ -1,6 +1,7 @@
 // Copyright (c) 2009-2014 The Bitcoin Core developers
+// Copyright (c) 2016-2023 The Zcash developers
 // Distributed under the MIT software license, see the accompanying
-// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+// file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 #include "clientversion.h"
 #include "coins.h"
@@ -9,13 +10,14 @@
 #include "core_io.h"
 #include "key_io.h"
 #include "keystore.h"
+#include "policy/policy.h"
 #include "primitives/transaction.h"
 #include "script/script.h"
 #include "script/sign.h"
 #include <univalue.h>
-#include "util.h"
-#include "utilmoneystr.h"
-#include "utilstrencodings.h"
+#include "util/system.h"
+#include "util/moneystr.h"
+#include "util/strencodings.h"
 
 #include <stdio.h>
 
@@ -25,6 +27,8 @@
 static bool fCreateBlank;
 static std::map<std::string,UniValue> registers;
 static const int CONTINUE_EXECUTION=-1;
+
+const std::function<std::string(const char*)> G_TRANSLATION_FUN = nullptr;
 
 //
 // This function returns either one of EXIT_ codes when it's expected to stop the process or
@@ -38,8 +42,10 @@ static int AppInitRawTx(int argc, char* argv[])
     ParseParameters(argc, argv);
 
     // Check for -testnet or -regtest parameter (Params() calls are only valid after this clause)
-    if (!SelectParamsFromCommandLine()) {
-        fprintf(stderr, "Error: Invalid combination of -regtest and -testnet.\n");
+    try {
+        SelectParams(ChainNameFromCommandLine());
+    } catch(std::exception &e) {
+        fprintf(stderr, "Error: %s\n", e.what());
         return false;
     }
 
@@ -61,8 +67,7 @@ static int AppInitRawTx(int argc, char* argv[])
         strUsage += HelpMessageOpt("-create", _("Create new, empty TX."));
         strUsage += HelpMessageOpt("-json", _("Select JSON output"));
         strUsage += HelpMessageOpt("-txid", _("Output only the hex-encoded transaction id of the resultant transaction."));
-        strUsage += HelpMessageOpt("-regtest", _("Enter regression test mode, which uses a special chain in which blocks can be solved instantly."));
-        strUsage += HelpMessageOpt("-testnet", _("Use the test network"));
+        AppendParamsHelpMessages(strUsage);
 
         fprintf(stdout, "%s", strUsage.c_str());
 
@@ -174,7 +179,7 @@ static void MutateTxVersion(CMutableTransaction& tx, const std::string& cmdVal)
 static void MutateTxExpiry(CMutableTransaction& tx, const std::string& cmdVal)
 {
     int64_t newExpiry = atoi64(cmdVal);
-    if (newExpiry >= TX_EXPIRY_HEIGHT_THRESHOLD) {
+    if (newExpiry <= 0 || newExpiry >= TX_EXPIRY_HEIGHT_THRESHOLD) {
         throw std::runtime_error("Invalid TX expiry requested");
     }
     tx.nExpiryHeight = (int) newExpiry;
@@ -238,9 +243,11 @@ static void MutateTxAddOutAddr(CMutableTransaction& tx, const std::string& strIn
     if (!ParseMoney(strValue, value))
         throw std::runtime_error("invalid TX output value");
 
+    KeyIO keyIO(Params());
+
     // extract and validate ADDRESS
     std::string strAddr = strInput.substr(pos + 1, std::string::npos);
-    CTxDestination destination = DecodeDestination(strAddr);
+    CTxDestination destination = keyIO.DecodeDestination(strAddr);
     if (!IsValidDestination(destination)) {
         throw std::runtime_error("invalid TX output address");
     }
@@ -327,22 +334,6 @@ static bool findSighashFlags(int& flags, const std::string& flagStr)
     return false;
 }
 
-uint256 ParseHashUO(std::map<std::string,UniValue>& o, std::string strKey)
-{
-    if (!o.count(strKey))
-        return uint256();
-    return ParseHashUV(o[strKey], strKey);
-}
-
-std::vector<unsigned char> ParseHexUO(std::map<std::string,UniValue>& o, std::string strKey)
-{
-    if (!o.count(strKey)) {
-        std::vector<unsigned char> emptyVec;
-        return emptyVec;
-    }
-    return ParseHexUV(o[strKey], strKey);
-}
-
 static CAmount AmountFromValue(const UniValue& value)
 {
     if (!value.isNum() && !value.isStr())
@@ -387,7 +378,7 @@ static void MutateTxSign(CMutableTransaction& tx, const std::string& strInput)
     // starts as a clone of the raw tx:
     CMutableTransaction mergedTx(txVariants[0]);
     bool fComplete = true;
-    CCoinsView viewDummy;
+    CCoinsViewDummy viewDummy;
     CCoinsViewCache view(&viewDummy);
 
     if (!registers.count("privatekeys"))
@@ -397,10 +388,12 @@ static void MutateTxSign(CMutableTransaction& tx, const std::string& strInput)
     UniValue keysObj = registers["privatekeys"];
     fGivenKeys = true;
 
+    KeyIO keyIO(Params());
+
     for (size_t kidx = 0; kidx < keysObj.size(); kidx++) {
         if (!keysObj[kidx].isStr())
             throw std::runtime_error("privatekey not a std::string");
-        CKey key = DecodeSecret(keysObj[kidx].getValStr());
+        CKey key = keyIO.DecodeSecret(keysObj[kidx].getValStr());
         if (!key.IsValid()) {
             throw std::runtime_error("privatekey not valid");
         }
@@ -460,6 +453,11 @@ static void MutateTxSign(CMutableTransaction& tx, const std::string& strInput)
     }
 
     const CKeyStore& keystore = tempKeystore;
+    // We don't support v5 transactions via this API yet.
+    if (mergedTx.nVersion >= ZIP225_TX_VERSION) {
+        throw std::runtime_error("v5+ transactions not supported yet");
+    }
+    const PrecomputedTransactionData txdata(mergedTx, {});
 
     bool fHashSingle = ((nHashType & ~SIGHASH_ANYONECANPAY) == SIGHASH_SINGLE);
 
@@ -480,14 +478,14 @@ static void MutateTxSign(CMutableTransaction& tx, const std::string& strInput)
         SignatureData sigdata;
         // Only sign SIGHASH_SINGLE if there's a corresponding output:
         if (!fHashSingle || (i < mergedTx.vout.size()))
-            ProduceSignature(MutableTransactionSignatureCreator(&keystore, &mergedTx, i, amount, nHashType), prevPubKey, sigdata, consensusBranchId);
+            ProduceSignature(MutableTransactionSignatureCreator(&keystore, &mergedTx, txdata, i, amount, nHashType), prevPubKey, sigdata, consensusBranchId);
 
         // ... and merge in other signatures:
-        BOOST_FOREACH(const CTransaction& txv, txVariants)
-            sigdata = CombineSignatures(prevPubKey, MutableTransactionSignatureChecker(&mergedTx, i, amount), sigdata, DataFromTransaction(txv, i), consensusBranchId);
+        for (const CTransaction& txv : txVariants)
+            sigdata = CombineSignatures(prevPubKey, MutableTransactionSignatureChecker(&mergedTx, txdata, i, amount), sigdata, DataFromTransaction(txv, i), consensusBranchId);
         UpdateTransaction(mergedTx, i, sigdata);
 
-        if (!VerifyScript(txin.scriptSig, prevPubKey, STANDARD_SCRIPT_VERIFY_FLAGS, MutableTransactionSignatureChecker(&mergedTx, i, amount), consensusBranchId))
+        if (!VerifyScript(txin.scriptSig, prevPubKey, STANDARD_SCRIPT_VERIFY_FLAGS, MutableTransactionSignatureChecker(&mergedTx, txdata, i, amount), consensusBranchId))
             fComplete = false;
     }
 
@@ -501,8 +499,6 @@ static void MutateTxSign(CMutableTransaction& tx, const std::string& strInput)
 
 class Secp256k1Init
 {
-    ECCVerifyHandle globalVerifyHandle;
-
 public:
     Secp256k1Init() {
         ECC_Start();
@@ -629,8 +625,11 @@ static int CommandLineRawTx(int argc, char* argv[])
             if (strHexTx == "-")                 // "-" implies standard input
                 strHexTx = readStdin();
 
-            if (!DecodeHexTx(txDecodeTmp, strHexTx))
-                throw std::runtime_error("invalid transaction encoding");
+            try {
+                DecodeHexTx(txDecodeTmp, strHexTx);
+            } catch (const std::exception& e) {
+                throw std::runtime_error(std::string("invalid transaction encoding: ") + e.what());
+            }
 
             startArg = 2;
         } else
@@ -653,10 +652,6 @@ static int CommandLineRawTx(int argc, char* argv[])
         }
 
         OutputTx(tx);
-    }
-
-    catch (const boost::thread_interrupted&) {
-        throw;
     }
     catch (const std::exception& e) {
         strPrint = std::string("error: ") + e.what();

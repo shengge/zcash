@@ -1,6 +1,7 @@
 // Copyright (c) 2012-2014 The Bitcoin Core developers
+// Copyright (c) 2016-2023 The Zcash developers
 // Distributed under the MIT software license, see the accompanying
-// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+// file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 #include "clientversion.h"
 
@@ -89,16 +90,7 @@ const std::string CLIENT_NAME("MagicBean");
 #endif
 #endif
 
-#ifndef BUILD_DATE
-#ifdef GIT_COMMIT_DATE
-#define BUILD_DATE GIT_COMMIT_DATE
-#else
-#define BUILD_DATE __DATE__ ", " __TIME__
-#endif
-#endif
-
 const std::string CLIENT_BUILD(BUILD_DESC CLIENT_VERSION_SUFFIX);
-const std::string CLIENT_DATE(BUILD_DATE);
 
 std::string FormatVersion(int nVersion)
 {

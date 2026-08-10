@@ -1,12 +1,14 @@
 ---
-name: "zcash-2.0.2-rc1"
+name: "zcash-6.20.0"
 enable_cache: true
 distro: "debian"
 suites:
-- "jessie"
+- "bookworm"
+- "bullseye"
 architectures:
 - "amd64"
 packages:
+- "curl"
 - "autoconf"
 - "automake"
 - "bsdmainutils"
@@ -16,11 +18,14 @@ packages:
 - "g++-multilib"
 - "git-core"
 - "libc6-dev"
+- "libtinfo5"
 - "libtool"
+- "libxml2"
 - "m4"
 - "ncurses-dev"
 - "pkg-config"
-- "python"
+- "python3"
+- "python-is-python3"
 - "unzip"
 - "wget"
 - "zlib1g-dev"
@@ -30,20 +35,20 @@ remotes:
 files: []
 script: |
   WRAP_DIR=$HOME/wrapped
-  HOSTS="x86_64-unknown-linux-gnu"
-  CONFIGFLAGS="--enable-glibc-back-compat --enable-reduce-exports --disable-bench --enable-hardening"
+  HOSTS="x86_64-linux-gnu"
+  CONFIGFLAGS="--enable-glibc-back-compat --enable-reduce-exports --disable-bench --enable-hardening --enable-werror"
   MAKEOPTS="V=1"
   FAKETIME_HOST_PROGS=""
   FAKETIME_PROGS="date ar ranlib nm strip objcopy"
-  HOST_CFLAGS="-fwrapv -fno-strict-aliasing -Werror -g"
-  HOST_CXXFLAGS="-fwrapv -fno-strict-aliasing -Werror -g"
+  HOST_CFLAGS=""
+  HOST_CXXFLAGS=""
   HOST_LDFLAGS=-static-libstdc++
 
   export QT_RCC_TEST=0
   export GZIP="-9n"
   export TAR_OPTIONS="--mtime="$REFERENCE_DATE\\\ $REFERENCE_TIME""
   export TZ="UTC"
-  export BUILD_DIR=`pwd`
+  export BUILD_DIR="$PWD"
   mkdir -p ${WRAP_DIR}
   if test -n "$GBUILD_CACHE_ENABLED"; then
     export SOURCES_PATH=${GBUILD_COMMON_CACHE}
@@ -53,7 +58,7 @@ script: |
 
   function create_global_faketime_wrappers {
   for prog in ${FAKETIME_PROGS}; do
-    echo '#!/bin/bash' > ${WRAP_DIR}/${prog}
+    echo '#!/usr/bin/env bash' > ${WRAP_DIR}/${prog}
     echo "REAL=\`which -a ${prog} | grep -v ${WRAP_DIR}/${prog} | head -1\`" >> ${WRAP_DIR}/${prog}
     echo 'export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/faketime/libfaketime.so.1' >> ${WRAP_DIR}/${prog}
     echo "export FAKETIME=\"$1\"" >> ${WRAP_DIR}/${prog}
@@ -65,7 +70,7 @@ script: |
   function create_per-host_faketime_wrappers {
   for i in $HOSTS; do
     for prog in ${FAKETIME_HOST_PROGS}; do
-        echo '#!/bin/bash' > ${WRAP_DIR}/${i}-${prog}
+        echo '#!/usr/bin/env bash' > ${WRAP_DIR}/${i}-${prog}
         echo "REAL=\`which -a ${i}-${prog} | grep -v ${WRAP_DIR}/${i}-${prog} | head -1\`" >> ${WRAP_DIR}/${i}-${prog}
         echo 'export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/faketime/libfaketime.so.1' >> ${WRAP_DIR}/${i}-${prog}
         echo "export FAKETIME=\"$1\"" >> ${WRAP_DIR}/${i}-${prog}
@@ -82,10 +87,10 @@ script: |
   create_per-host_faketime_wrappers "2000-01-01 12:00:00"
 
   cd zcash
-  BASEPREFIX=`pwd`/depends
+  BASEPREFIX="${PWD}/depends"
   # Build dependencies for each host
   for i in $HOSTS; do
-    NO_PROTON="x" make ${MAKEOPTS} -C ${BASEPREFIX} HOST="${i}"
+    make ${MAKEOPTS} -C ${BASEPREFIX} HOST="${i}"
   done
 
   # Faketime for binaries
@@ -94,10 +99,11 @@ script: |
 
   # Create the release tarball using (arbitrarily) the first host
   ./autogen.sh
-  CONFIG_SITE=${BASEPREFIX}/`echo "${HOSTS}" | awk '{print $1;}'`/share/config.site ./configure --prefix=/
+  CONFIG_SITE=${BASEPREFIX}/$(echo "${HOSTS}" | awk '{print $1;}')/share/config.site ./configure --prefix=/
   make dist
-  SOURCEDIST=`echo zcash-*.tar.gz`
-  DISTNAME=`echo ${SOURCEDIST} | sed 's/.tar.*//'`
+  SOURCEDIST=$(echo zcash-*.tar.gz)
+  DISTNAME=${SOURCEDIST/%.tar.gz}
+
   # Correct tar file order
   mkdir -p temp
   pushd temp
@@ -111,11 +117,12 @@ script: |
     export PATH=${BASEPREFIX}/${i}/native/bin:${ORIGPATH}
     mkdir -p distsrc-${i}
     cd distsrc-${i}
-    INSTALLPATH=`pwd`/installed/${DISTNAME}
+    INSTALLPATH="${PWD}/installed/${DISTNAME}"
     mkdir -p ${INSTALLPATH}
     tar --strip-components=1 -xf ../$SOURCEDIST
 
     CONFIG_SITE=${BASEPREFIX}/${i}/share/config.site ./configure --prefix=/ --disable-ccache --disable-maintainer-mode --disable-dependency-tracking ${CONFIGFLAGS} CFLAGS="${HOST_CFLAGS}" CXXFLAGS="${HOST_CXXFLAGS}" LDFLAGS="${HOST_LDFLAGS}"
+    mkdir -p src/obj # Pre-create -I./obj dir for clang 22 -Werror -Wmissing-include-dirs (avoids race with genbuild.sh)
     make ${MAKEOPTS}
     make ${MAKEOPTS} -C src check-security
     make install DESTDIR=${INSTALLPATH}

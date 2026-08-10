@@ -1,7 +1,8 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2014 The Bitcoin Core developers
+// Copyright (c) 2016-2025 The Zcash developers
 // Distributed under the MIT software license, see the accompanying
-// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+// file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 #ifndef BITCOIN_CHAINPARAMS_H
 #define BITCOIN_CHAINPARAMS_H
@@ -12,6 +13,8 @@
 #include "protocol.h"
 
 #include <vector>
+
+#include <rust/bridge.h>
 
 struct CDNSSeedData {
     std::string name, host;
@@ -39,36 +42,72 @@ struct CCheckpointData {
  * a regression test mode which is intended for private networks only. It has
  * minimal difficulty to ensure that blocks can be found instantly.
  */
-class CChainParams
+class CChainParams: public KeyConstants
 {
 public:
-    enum Base58Type {
-        PUBKEY_ADDRESS,
-        SCRIPT_ADDRESS,
-        SECRET_KEY,
-        EXT_PUBLIC_KEY,
-        EXT_SECRET_KEY,
-
-        ZCPAYMENT_ADDRRESS,
-        ZCSPENDING_KEY,
-        ZCVIEWING_KEY,
-
-        MAX_BASE58_TYPES
-    };
-
-    enum Bech32Type {
-        SAPLING_PAYMENT_ADDRESS,
-        SAPLING_FULL_VIEWING_KEY,
-        SAPLING_INCOMING_VIEWING_KEY,
-        SAPLING_EXTENDED_SPEND_KEY,
-
-        MAX_BECH32_TYPES
-    };
-
     const Consensus::Params& GetConsensus() const { return consensus; }
+
+    /// Whether a transaction built for `nHeight` should be proved against the fixed
+    /// (NU6.2-onward) Orchard circuit rather than the historical (insecure) one.
+    ///
+    /// On testnet and regtest, it follows NU6.2 activation (on regtest so that tests can
+    /// reconstruct pre-NU6.2 Orchard history; on testnet because the emergency soft fork
+    /// to disable Orchard will not activate until NU6.2). On mainnet, the fixed Orchard
+    /// circuit is used unconditionally: we know that the emergency soft fork has already
+    /// activated on mainnet, and this makes it easier to reason about the behaviour during
+    /// sync or when eclipsed.
+    bool UseFixedCircuitForProving(int nHeight) const {
+        return NetworkIDString() == CBaseChainParams::MAIN ||
+               GetConsensus().NetworkUpgradeActive(nHeight, Consensus::UPGRADE_NU6_2);
+    }
+    const rust::Box<consensus::Network> RustNetwork() const {
+        return consensus::network(
+            NetworkIDString(),
+            consensus.vUpgrades[Consensus::UPGRADE_OVERWINTER].nActivationHeight,
+            consensus.vUpgrades[Consensus::UPGRADE_SAPLING].nActivationHeight,
+            consensus.vUpgrades[Consensus::UPGRADE_BLOSSOM].nActivationHeight,
+            consensus.vUpgrades[Consensus::UPGRADE_HEARTWOOD].nActivationHeight,
+            consensus.vUpgrades[Consensus::UPGRADE_CANOPY].nActivationHeight,
+            consensus.vUpgrades[Consensus::UPGRADE_NU5].nActivationHeight,
+            consensus.vUpgrades[Consensus::UPGRADE_NU6].nActivationHeight,
+            consensus.vUpgrades[Consensus::UPGRADE_NU6_1].nActivationHeight,
+            consensus.vUpgrades[Consensus::UPGRADE_NU6_2].nActivationHeight);
+    }
     const CMessageHeader::MessageStartChars& MessageStart() const { return pchMessageStart; }
-    const std::vector<unsigned char>& AlertKey() const { return vAlertPubKey; }
     int GetDefaultPort() const { return nDefaultPort; }
+
+    CAmount SproutValuePoolCheckpointHeight() const { return nSproutValuePoolCheckpointHeight; }
+    CAmount SproutValuePoolCheckpointBalance() const { return nSproutValuePoolCheckpointBalance; }
+    uint256 SproutValuePoolCheckpointBlockHash() const { return hashSproutValuePoolCheckpointBlock; }
+    int ChainSupplyCheckpointHeight() const { return nChainSupplyCheckpointHeight; }
+    CAmount ChainSupplyCheckpointTotalSupply() const { return nChainSupplyCheckpointTotalSupply; }
+    CAmount ChainSupplyCheckpointTransparentValue() const { return nChainSupplyCheckpointTransparentValue; }
+    CAmount ChainSupplyCheckpointSproutValue() const { return nChainSupplyCheckpointSproutValue; }
+    CAmount ChainSupplyCheckpointSaplingValue() const { return nChainSupplyCheckpointSaplingValue; }
+    CAmount ChainSupplyCheckpointOrchardValue() const { return nChainSupplyCheckpointOrchardValue; }
+    CAmount ChainSupplyCheckpointLockboxValue() const { return nChainSupplyCheckpointLockboxValue; }
+    uint256 ChainSupplyCheckpointBlockHash() const { return hashChainSupplyCheckpointBlock; }
+    /**
+     * When true, the turnstile checks defined by ZIP 209 are enforced in
+     * `ConnectBlock`. Always true on mainnet and testnet (these are consensus
+     * rules). On regtest, defaults to false (so that regtest tests can
+     * construct chains that don't satisfy the turnstile invariants without
+     * being rejected) and is enabled only when `-developersetpoolsizezero` is
+     * set, allowing turnstile violations to be exercised by tests and developer
+     * debugging.
+     */
+    bool ZIP209Enabled() const { return fZIP209Enabled; }
+    /**
+     * Regtest-only: when true, the supply consistency check in `ConnectBlock`
+     * skips on blocks where chain supply tracking fields (`nChainTotalSupply`,
+     * `nChainTransparentValue`) are missing, instead of aborting the node with
+     * a "reindex required" message. This is needed only by tests that use the
+     * `sprout` regtest cache, which was generated by a zcashd version older
+     * than `TRANSPARENT_VALUE_VERSION`. The flag is set via
+     * `-regtestallowlegacychainsupplydata` and is rejected outside regtest.
+     */
+    bool RegTestAllowLegacyChainSupplyData() const { return fRegTestAllowLegacyChainSupplyData; }
+    bool RequireWalletBackup() const { return fRequireWalletBackup; }
 
     const CBlock& GenesisBlock() const { return genesis; }
     /** Make miner wait to have peers to avoid wasting work */
@@ -78,19 +117,29 @@ public:
     /** Policy: Filter transactions that do not match well-defined patterns */
     bool RequireStandard() const { return fRequireStandard; }
     int64_t PruneAfterHeight() const { return nPruneAfterHeight; }
-    unsigned int EquihashN() const { return nEquihashN; }
-    unsigned int EquihashK() const { return nEquihashK; }
     std::string CurrencyUnits() const { return strCurrencyUnits; }
-    uint32_t BIP44CoinType() const { return bip44CoinType; }
     /** Make miner stop after a block is found. In RPC, don't return until nGenProcLimit blocks are generated */
     bool MineBlocksOnDemand() const { return fMineBlocksOnDemand; }
     /** In the future use NetworkIDString() for RPC fields */
     bool TestnetToBeDeprecatedFieldRPC() const { return fTestnetToBeDeprecatedFieldRPC; }
-    /** Return the BIP70 network string (main, test or regtest) */
-    std::string NetworkIDString() const { return strNetworkID; }
     const std::vector<CDNSSeedData>& DNSSeeds() const { return vSeeds; }
-    const std::vector<unsigned char>& Base58Prefix(Base58Type type) const { return base58Prefixes[type]; }
-    const std::string& Bech32HRP(Bech32Type type) const { return bech32HRPs[type]; }
+    /** Return the BIP70 network string (main, test or regtest) */
+    std::string NetworkIDString() const {
+        return keyConstants.NetworkIDString();
+    }
+    /** Return the BIP44 coin type for addresses created by the zcashd embedded wallet. */
+    uint32_t BIP44CoinType() const {
+        return keyConstants.BIP44CoinType();
+    }
+    const std::vector<unsigned char>& Base58Prefix(Base58Type type) const {
+        return keyConstants.Base58Prefix(type);
+    }
+    const std::string& Bech32HRP(Bech32Type type) const {
+        return keyConstants.Bech32HRP(type);
+    }
+    const std::string& Bech32mHRP(Bech32mType type) const {
+        return keyConstants.Bech32mHRP(type);
+    }
     const std::vector<SeedSpec6>& FixedSeeds() const { return vFixedSeeds; }
     const CCheckpointData& Checkpoints() const { return checkpointData; }
     /** Return the founder's reward address and script for a given block height */
@@ -98,24 +147,17 @@ public:
     CScript GetFoundersRewardScriptAtHeight(int height) const;
     std::string GetFoundersRewardAddressAtIndex(int i) const;
     /** Enforce coinbase consensus rule in regtest mode */
-    void SetRegTestCoinbaseMustBeProtected() { consensus.fCoinbaseMustBeProtected = true; }
+    void SetRegTestCoinbaseMustBeShielded() { consensus.fCoinbaseMustBeShielded = true; }
 protected:
     CChainParams() {}
 
     Consensus::Params consensus;
     CMessageHeader::MessageStartChars pchMessageStart;
-    //! Raw pub key bytes for the broadcast alert signing key.
-    std::vector<unsigned char> vAlertPubKey;
     int nDefaultPort = 0;
     uint64_t nPruneAfterHeight = 0;
-    unsigned int nEquihashN = 0;
-    unsigned int nEquihashK = 0;
     std::vector<CDNSSeedData> vSeeds;
-    std::vector<unsigned char> base58Prefixes[MAX_BASE58_TYPES];
-    std::string bech32HRPs[MAX_BECH32_TYPES];
-    std::string strNetworkID;
+    CBaseKeyConstants keyConstants;
     std::string strCurrencyUnits;
-    uint32_t bip44CoinType;
     CBlock genesis;
     std::vector<SeedSpec6> vFixedSeeds;
     bool fMiningRequiresPeers = false;
@@ -125,6 +167,21 @@ protected:
     bool fTestnetToBeDeprecatedFieldRPC = false;
     CCheckpointData checkpointData;
     std::vector<std::string> vFoundersRewardAddress;
+
+    CAmount nSproutValuePoolCheckpointHeight = 0;
+    CAmount nSproutValuePoolCheckpointBalance = 0;
+    uint256 hashSproutValuePoolCheckpointBlock;
+    int nChainSupplyCheckpointHeight = 0;
+    CAmount nChainSupplyCheckpointTotalSupply = 0;
+    CAmount nChainSupplyCheckpointTransparentValue = 0;
+    CAmount nChainSupplyCheckpointSproutValue = 0;
+    CAmount nChainSupplyCheckpointSaplingValue = 0;
+    CAmount nChainSupplyCheckpointOrchardValue = 0;
+    CAmount nChainSupplyCheckpointLockboxValue = 0;
+    uint256 hashChainSupplyCheckpointBlock;
+    bool fZIP209Enabled = false;
+    bool fRegTestAllowLegacyChainSupplyData = false;
+    bool fRequireWalletBackup = true;
 };
 
 /**
@@ -133,21 +190,43 @@ protected:
  */
 const CChainParams &Params();
 
-/** Return parameters for the given network. */
-CChainParams &Params(CBaseChainParams::Network network);
-
-/** Sets the params returned by Params() to those for the given network. */
-void SelectParams(CBaseChainParams::Network network);
+/**
+ * @returns CChainParams for the given BIP70 chain name.
+ */
+const CChainParams& Params(const std::string& chain);
 
 /**
- * Looks for -regtest or -testnet and then calls SelectParams as appropriate.
- * Returns false if an invalid combination is given.
+ * Sets the params returned by Params() to those for the given BIP70 chain name.
+ * @throws std::runtime_error when the chain is not supported.
  */
-bool SelectParamsFromCommandLine();
+void SelectParams(const std::string& chain);
 
 /**
  * Allows modifying the network upgrade regtest parameters.
  */
 void UpdateNetworkUpgradeParameters(Consensus::UpgradeIndex idx, int nActivationHeight);
+
+void UpdateRegtestPow(
+    int64_t nPowMaxAdjustDown,
+    int64_t nPowMaxAdjustUp,
+    uint256 powLimit,
+    bool noRetargeting);
+
+/**
+ * Allows modifying the regtest funding stream parameters.
+ */
+void UpdateFundingStreamParameters(Consensus::FundingStreamIndex idx, Consensus::FundingStream fs);
+
+/**
+ * Allows modifying the regtest one-time lockbox disbursement parameters.
+ */
+void UpdateOnetimeLockboxDisbursementParameters(
+    Consensus::OnetimeLockboxDisbursementIndex idx,
+    Consensus::OnetimeLockboxDisbursement ld);
+
+/**
+ * Allows modifying the regtest temporary Orchard disabling soft fork.
+ */
+void UpdateRegtestTemporaryOrchardDisablingSoftForkHeight(int nHeight);
 
 #endif // BITCOIN_CHAINPARAMS_H

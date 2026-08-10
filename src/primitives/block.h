@@ -1,7 +1,8 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2013 The Bitcoin Core developers
+// Copyright (c) 2016-2023 The Zcash developers
 // Distributed under the MIT software license, see the accompanying
-// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+// file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 #ifndef BITCOIN_PRIMITIVES_BLOCK_H
 #define BITCOIN_PRIMITIVES_BLOCK_H
@@ -9,6 +10,11 @@
 #include "primitives/transaction.h"
 #include "serialize.h"
 #include "uint256.h"
+
+// Derives the ZIP 244 block commitments hash.
+uint256 DeriveBlockCommitmentsHash(
+    uint256 hashChainHistoryRoot,
+    uint256 hashAuthDataRoot);
 
 /** Nodes collect new transactions into a block, hash them into a hash tree,
  * and scan through nonce values to make the block's hash satisfy proof-of-work
@@ -21,12 +27,12 @@ class CBlockHeader
 {
 public:
     // header
-    static const size_t HEADER_SIZE=4+32+32+32+4+4+32; // excluding Equihash solution
-    static const int32_t CURRENT_VERSION=4;
+    enum : size_t { HEADER_SIZE=4+32+32+32+4+4+32 }; // excluding Equihash solution
+    enum : int32_t { CURRENT_VERSION=4 };
     int32_t nVersion;
     uint256 hashPrevBlock;
     uint256 hashMerkleRoot;
-    uint256 hashFinalSaplingRoot;
+    uint256 hashBlockCommitments;
     uint32_t nTime;
     uint32_t nBits;
     uint256 nNonce;
@@ -44,7 +50,7 @@ public:
         READWRITE(this->nVersion);
         READWRITE(hashPrevBlock);
         READWRITE(hashMerkleRoot);
-        READWRITE(hashFinalSaplingRoot);
+        READWRITE(hashBlockCommitments);
         READWRITE(nTime);
         READWRITE(nBits);
         READWRITE(nNonce);
@@ -56,7 +62,7 @@ public:
         nVersion = CBlockHeader::CURRENT_VERSION;
         hashPrevBlock.SetNull();
         hashMerkleRoot.SetNull();
-        hashFinalSaplingRoot.SetNull();
+        hashBlockCommitments.SetNull();
         nTime = 0;
         nBits = 0;
         nNonce = uint256();
@@ -84,7 +90,7 @@ public:
     std::vector<CTransaction> vtx;
 
     // memory only
-    mutable std::vector<uint256> vMerkleTree;
+    mutable bool fChecked;
 
     CBlock()
     {
@@ -109,7 +115,7 @@ public:
     {
         CBlockHeader::SetNull();
         vtx.clear();
-        vMerkleTree.clear();
+        fChecked = false;
     }
 
     CBlockHeader GetBlockHeader() const
@@ -118,7 +124,7 @@ public:
         block.nVersion       = nVersion;
         block.hashPrevBlock  = hashPrevBlock;
         block.hashMerkleRoot = hashMerkleRoot;
-        block.hashFinalSaplingRoot   = hashFinalSaplingRoot;
+        block.hashBlockCommitments = hashBlockCommitments;
         block.nTime          = nTime;
         block.nBits          = nBits;
         block.nNonce         = nNonce;
@@ -126,14 +132,10 @@ public:
         return block;
     }
 
-    // Build the in-memory merkle tree for this block and return the merkle root.
-    // If non-NULL, *mutated is set to whether mutation was detected in the merkle
-    // tree (a duplication of transactions in the block leading to an identical
-    // merkle root).
-    uint256 BuildMerkleTree(bool* mutated = NULL) const;
+    // Build the authorizing data Merkle tree for this block and return its
+    // root.
+    uint256 BuildAuthDataMerkleTree() const;
 
-    std::vector<uint256> GetMerkleBranch(int nIndex) const;
-    static uint256 CheckMerkleBranch(uint256 hash, const std::vector<uint256>& vMerkleBranch, int nIndex);
     std::string ToString() const;
 };
 
@@ -158,7 +160,7 @@ public:
         READWRITE(this->nVersion);
         READWRITE(hashPrevBlock);
         READWRITE(hashMerkleRoot);
-        READWRITE(hashFinalSaplingRoot);
+        READWRITE(hashBlockCommitments);
         READWRITE(nTime);
         READWRITE(nBits);
     }

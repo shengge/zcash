@@ -1,7 +1,8 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2014 The Bitcoin Core developers
+// Copyright (c) 2017-2023 The Zcash developers
 // Distributed under the MIT software license, see the accompanying
-// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+// file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 #ifdef HAVE_CONFIG_H
 #include "config/bitcoin-config.h"
@@ -13,8 +14,8 @@
 #include "sync.h"
 #include "uint256.h"
 #include "random.h"
-#include "util.h"
-#include "utilstrencodings.h"
+#include "util/system.h"
+#include "util/strencodings.h"
 
 #ifdef HAVE_GETADDRINFO_A
 #include <netdb.h>
@@ -40,7 +41,7 @@ static proxyType proxyInfo[NET_MAX];
 static proxyType nameProxy;
 static CCriticalSection cs_proxyInfos;
 int nConnectTimeout = DEFAULT_CONNECT_TIMEOUT;
-bool fNameLookup = false;
+bool fNameLookup = DEFAULT_NAME_LOOKUP;
 
 static const unsigned char pchIPv4[12] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff };
 
@@ -123,11 +124,7 @@ bool static LookupIntern(const char *pszName, std::vector<CNetAddr>& vIP, unsign
     aiHint.ai_socktype = SOCK_STREAM;
     aiHint.ai_protocol = IPPROTO_TCP;
     aiHint.ai_family = AF_UNSPEC;
-#ifdef WIN32
-    aiHint.ai_flags = fAllowLookup ? 0 : AI_NUMERICHOST;
-#else
     aiHint.ai_flags = fAllowLookup ? AI_ADDRCONFIG : AI_NUMERICHOST;
-#endif
 
     struct addrinfo *aiRes = NULL;
 #ifdef HAVE_GETADDRINFO_A
@@ -246,7 +243,7 @@ struct timeval MillisToTimeval(int64_t nTimeout)
  *
  * @note This function requires that hSocket is in non-blocking mode.
  */
-bool static InterruptibleRecv(char* data, size_t len, int timeout, SOCKET& hSocket)
+bool static InterruptibleRecv(uint8_t* data, size_t len, int timeout, SOCKET& hSocket)
 {
     int64_t curTime = GetTimeMillis();
     int64_t endTime = curTime + timeout;
@@ -254,7 +251,13 @@ bool static InterruptibleRecv(char* data, size_t len, int timeout, SOCKET& hSock
     // to break off in case of an interruption.
     const int64_t maxWait = 1000;
     while (len > 0 && curTime < endTime) {
-        ssize_t ret = recv(hSocket, data, len, 0); // Optimistically try the recv first
+        // Optimistically try the recv first.
+        //
+        // POSIX recv() does not require a cast, as it takes a void *buf:
+        //     ssize_t recv(int sockfd, void *buf, size_t len, int flags);
+        // However Windows explicitly requires a char *buf:
+        //     int recv(SOCKET s, char *buf, int len, int flags);
+        ssize_t ret = recv(hSocket, reinterpret_cast<char*>(data), len, 0);
         if (ret > 0) {
             len -= ret;
             data += ret;
@@ -314,7 +317,7 @@ static bool Socks5(const std::string& strDest, int port, const ProxyCredentials 
         CloseSocket(hSocket);
         return error("Error sending to proxy");
     }
-    char pchRet1[2];
+    uint8_t pchRet1[2];
     if (!InterruptibleRecv(pchRet1, 2, SOCKS5_RECV_TIMEOUT, hSocket)) {
         CloseSocket(hSocket);
         return error("Error reading proxy response");
@@ -339,7 +342,7 @@ static bool Socks5(const std::string& strDest, int port, const ProxyCredentials 
             return error("Error sending authentication to proxy");
         }
         LogPrint("proxy", "SOCKS5 sending proxy authentication %s:%s\n", auth->username, auth->password);
-        char pchRetA[2];
+        uint8_t pchRetA[2];
         if (!InterruptibleRecv(pchRetA, 2, SOCKS5_RECV_TIMEOUT, hSocket)) {
             CloseSocket(hSocket);
             return error("Error reading proxy authentication response");
@@ -368,7 +371,7 @@ static bool Socks5(const std::string& strDest, int port, const ProxyCredentials 
         CloseSocket(hSocket);
         return error("Error sending to proxy");
     }
-    char pchRet2[4];
+    uint8_t pchRet2[4];
     if (!InterruptibleRecv(pchRet2, 4, SOCKS5_RECV_TIMEOUT, hSocket)) {
         CloseSocket(hSocket);
         return error("Error reading proxy response");
@@ -396,7 +399,7 @@ static bool Socks5(const std::string& strDest, int port, const ProxyCredentials 
         CloseSocket(hSocket);
         return error("Error: malformed proxy response");
     }
-    char pchRet3[256];
+    uint8_t pchRet3[256];
     switch (pchRet2[3])
     {
         case 0x01: ret = InterruptibleRecv(pchRet3, 4, SOCKS5_RECV_TIMEOUT, hSocket); break;
@@ -408,7 +411,7 @@ static bool Socks5(const std::string& strDest, int port, const ProxyCredentials 
                 CloseSocket(hSocket);
                 return error("Error reading from proxy");
             }
-            int nRecv = pchRet3[0];
+            size_t nRecv = pchRet3[0];
             ret = InterruptibleRecv(pchRet3, nRecv, SOCKS5_RECV_TIMEOUT, hSocket);
             break;
         }
@@ -575,8 +578,8 @@ static bool ConnectThroughProxy(const proxyType &proxy, const std::string& strDe
     // do socks negotiation
     if (proxy.randomize_credentials) {
         ProxyCredentials random_auth;
-        random_auth.username = strprintf("%i", insecure_rand());
-        random_auth.password = strprintf("%i", insecure_rand());
+        static std::atomic_int counter;
+        random_auth.username = random_auth.password = strprintf("%i", counter++);
         if (!Socks5(strDest, (unsigned short)port, &random_auth, hSocket))
             return false;
     } else {
@@ -1298,6 +1301,13 @@ CSubNet::CSubNet(const std::string &strSubnet, bool fAllowLookup)
         network.ip[x] &= netmask[x];
 }
 
+CSubNet::CSubNet(const CNetAddr &addr):
+    valid(addr.IsValid())
+{
+    memset(netmask, 255, sizeof(netmask));
+    network = addr;
+}
+
 bool CSubNet::Match(const CNetAddr &addr) const
 {
     if (!valid || !addr.IsValid())
@@ -1308,17 +1318,57 @@ bool CSubNet::Match(const CNetAddr &addr) const
     return true;
 }
 
+static inline int NetmaskBits(uint8_t x)
+{
+    switch(x) {
+    case 0x00: return 0; break;
+    case 0x80: return 1; break;
+    case 0xc0: return 2; break;
+    case 0xe0: return 3; break;
+    case 0xf0: return 4; break;
+    case 0xf8: return 5; break;
+    case 0xfc: return 6; break;
+    case 0xfe: return 7; break;
+    case 0xff: return 8; break;
+    default: return -1; break;
+    }
+}
+
 std::string CSubNet::ToString() const
 {
+    /* Parse binary 1{n}0{N-n} to see if mask can be represented as /n */
+    int cidr = 0;
+    bool valid_cidr = true;
+    int n = network.IsIPv4() ? 12 : 0;
+    for (; n < 16 && netmask[n] == 0xff; ++n)
+        cidr += 8;
+    if (n < 16) {
+        int bits = NetmaskBits(netmask[n]);
+        if (bits < 0)
+            valid_cidr = false;
+        else
+            cidr += bits;
+        ++n;
+    }
+    for (; n < 16 && valid_cidr; ++n)
+        if (netmask[n] != 0x00)
+            valid_cidr = false;
+
+    /* Format output */
     std::string strNetmask;
-    if (network.IsIPv4())
-        strNetmask = strprintf("%u.%u.%u.%u", netmask[12], netmask[13], netmask[14], netmask[15]);
-    else
-        strNetmask = strprintf("%x:%x:%x:%x:%x:%x:%x:%x",
-                         netmask[0] << 8 | netmask[1], netmask[2] << 8 | netmask[3],
-                         netmask[4] << 8 | netmask[5], netmask[6] << 8 | netmask[7],
-                         netmask[8] << 8 | netmask[9], netmask[10] << 8 | netmask[11],
-                         netmask[12] << 8 | netmask[13], netmask[14] << 8 | netmask[15]);
+    if (valid_cidr) {
+        strNetmask = strprintf("%u", cidr);
+    } else {
+        if (network.IsIPv4())
+            strNetmask = strprintf("%u.%u.%u.%u", netmask[12], netmask[13], netmask[14], netmask[15]);
+        else
+            strNetmask = strprintf("%x:%x:%x:%x:%x:%x:%x:%x",
+                             netmask[0] << 8 | netmask[1], netmask[2] << 8 | netmask[3],
+                             netmask[4] << 8 | netmask[5], netmask[6] << 8 | netmask[7],
+                             netmask[8] << 8 | netmask[9], netmask[10] << 8 | netmask[11],
+                             netmask[12] << 8 | netmask[13], netmask[14] << 8 | netmask[15]);
+    }
+
     return network.ToString() + "/" + strNetmask;
 }
 

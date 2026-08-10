@@ -1,16 +1,22 @@
-#!/usr/bin/env python2
-import inspect
-import os
+#!/usr/bin/env python3
 
-# To keep pyflakes happy
-WalletShieldCoinbaseTest = object
-
-cwd = os.path.dirname(os.path.abspath(inspect.getfile(inspect.currentframe())))
-execfile(os.path.join(cwd, 'wallet_shieldcoinbase.py'))
+from wallet_shieldcoinbase import WalletShieldCoinbaseTest
+from test_framework.util import assert_equal
 
 class WalletShieldCoinbaseSapling(WalletShieldCoinbaseTest):
     def __init__(self):
-        super(WalletShieldCoinbaseSapling, self).__init__('sapling')
+        super(WalletShieldCoinbaseSapling, self).__init__()
+        self.nu5_activation = 99999
+
+    def test_init_zaddr(self, node):
+        self.addr = node.z_getnewaddress('sapling')
+        return self.addr
+
+    def test_check_balance_zaddr(self, node, expected):
+        balance = node.z_getbalance(self.addr)
+        assert_equal(balance, expected)
+
 
 if __name__ == '__main__':
+    print("Test shielding to a sapling address")
     WalletShieldCoinbaseSapling().main()

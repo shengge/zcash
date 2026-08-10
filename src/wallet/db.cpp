@@ -1,15 +1,17 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2014 The Bitcoin Core developers
+// Copyright (c) 2016-2023 The Zcash developers
 // Distributed under the MIT software license, see the accompanying
-// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+// file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
-#include "db.h"
+#include "wallet/db.h"
 
 #include "addrman.h"
+#include "fs.h"
 #include "hash.h"
 #include "protocol.h"
-#include "util.h"
-#include "utilstrencodings.h"
+#include "util/system.h"
+#include "util/strencodings.h"
 
 #include <stdint.h>
 
@@ -17,14 +19,10 @@
 #include <sys/stat.h>
 #endif
 
-#include <boost/filesystem.hpp>
 #include <boost/thread.hpp>
 #include <boost/version.hpp>
 
 using namespace std;
-
-
-unsigned int nWalletDBUpdated;
 
 
 //
@@ -71,7 +69,7 @@ void CDBEnv::Close()
     EnvShutdown();
 }
 
-bool CDBEnv::Open(const boost::filesystem::path& pathIn)
+bool CDBEnv::Open(const fs::path& pathIn)
 {
     if (fDbEnvInit)
         return true;
@@ -79,13 +77,13 @@ bool CDBEnv::Open(const boost::filesystem::path& pathIn)
     boost::this_thread::interruption_point();
 
     strPath = pathIn.string();
-    boost::filesystem::path pathLogDir = pathIn / "database";
+    fs::path pathLogDir = pathIn / "database";
     TryCreateDirectory(pathLogDir);
-    boost::filesystem::path pathErrorFile = pathIn / "db.log";
+    fs::path pathErrorFile = pathIn / "db.log";
     LogPrintf("CDBEnv::Open: LogDir=%s ErrorFile=%s\n", pathLogDir.string(), pathErrorFile.string());
 
     unsigned int nEnvFlags = 0;
-    if (GetBoolArg("-privdb", true))
+    if (GetBoolArg("-privdb", DEFAULT_WALLET_PRIVDB))
         nEnvFlags |= DB_PRIVATE;
 
     dbenv->set_lg_dir(pathLogDir.string().c_str());
@@ -94,7 +92,7 @@ bool CDBEnv::Open(const boost::filesystem::path& pathIn)
     dbenv->set_lg_max(1048576);
     dbenv->set_lk_max_locks(40000);
     dbenv->set_lk_max_objects(40000);
-    dbenv->set_errfile(fopen(pathErrorFile.string().c_str(), "a")); /// debug
+    dbenv->set_errfile(fsbridge::fopen(pathErrorFile, "a")); /// debug
     dbenv->set_flags(DB_AUTO_COMMIT, 1);
     dbenv->set_flags(DB_TXN_WRITE_NOSYNC, 1);
     dbenv->log_set_config(DB_LOG_AUTO_REMOVE, 1);
@@ -293,7 +291,7 @@ void CDB::Flush()
     if (fReadOnly)
         nMinutes = 1;
 
-    bitdb.dbenv->txn_checkpoint(nMinutes ? GetArg("-dblogsize", 100) * 1024 : 0, nMinutes, 0);
+    bitdb.dbenv->txn_checkpoint(nMinutes ? GetArg("-dblogsize", DEFAULT_WALLET_DBLOGSIZE) * 1024 : 0, nMinutes, 0);
 }
 
 void CDB::Close()
@@ -381,15 +379,15 @@ bool CDB::Rewrite(const string& strFile, const char* pszSkip)
                                 break;
                             }
                             if (pszSkip &&
-                                strncmp(&ssKey[0], pszSkip, std::min(ssKey.size(), strlen(pszSkip))) == 0)
+                                strncmp(ssKey.data(), pszSkip, std::min(ssKey.size(), strlen(pszSkip))) == 0)
                                 continue;
-                            if (strncmp(&ssKey[0], "\x07version", 8) == 0) {
+                            if (strncmp(ssKey.data(), "\x07version", 8) == 0) {
                                 // Update version:
                                 ssValue.clear();
                                 ssValue << CLIENT_VERSION;
                             }
-                            Dbt datKey(&ssKey[0], ssKey.size());
-                            Dbt datValue(&ssValue[0], ssValue.size());
+                            Dbt datKey(ssKey.data(), ssKey.size());
+                            Dbt datValue(ssValue.data(), ssValue.size());
                             int ret2 = pdbCopy->put(NULL, &datKey, &datValue, DB_NOOVERWRITE);
                             if (ret2 > 0)
                                 fSuccess = false;
@@ -444,7 +442,7 @@ void CDBEnv::Flush(bool fShutdown)
                 if (!fMockDb)
                     dbenv->lsn_reset(strFile.c_str(), 0);
                 LogPrint("db", "CDBEnv::Flush: %s closed\n", strFile);
-                mapFileUseCount.erase(mi++);
+                mi = mapFileUseCount.erase(mi);
             } else
                 mi++;
         }
@@ -455,7 +453,7 @@ void CDBEnv::Flush(bool fShutdown)
                 dbenv->log_archive(&listp, DB_ARCH_REMOVE);
                 Close();
                 if (!fMockDb)
-                    boost::filesystem::remove_all(boost::filesystem::path(strPath) / "database");
+                    fs::remove_all(fs::path(strPath) / "database");
             }
         }
     }

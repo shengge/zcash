@@ -1,8 +1,8 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2014 The Bitcoin Core developers
-// Copyright (c) 2017 The Zcash developers
+// Copyright (c) 2017-2023 The Zcash developers
 // Distributed under the MIT software license, see the accompanying
-// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+// file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 #ifndef BITCOIN_KEY_H
 #define BITCOIN_KEY_H
@@ -14,7 +14,6 @@
 
 #include <stdexcept>
 #include <vector>
-
 
 /**
  * secure_allocator is defined in allocators.h
@@ -49,7 +48,7 @@ private:
     bool fCompressed;
 
     //! The actual byte data
-    unsigned char vch[32];
+    std::vector<unsigned char, secure_allocator<unsigned char> > keydata;
 
     //! Check whether the 32-byte array pointed to be vch is valid keydata.
     bool static Check(const unsigned char* vch);
@@ -58,38 +57,38 @@ public:
     //! Construct an invalid private key.
     CKey() : fValid(false), fCompressed(false)
     {
-        LockObject(vch);
+        // Important: vch must be 32 bytes in length to not break serialization
+        keydata.resize(32);
     }
 
-    //! Copy constructor. This is necessary because of memlocking.
-    CKey(const CKey& secret) : fValid(secret.fValid), fCompressed(secret.fCompressed)
-    {
-        LockObject(vch);
-        memcpy(vch, secret.vch, sizeof(vch));
-    }
+    /**
+     * Construct a random key. This is used only for internal sanity checks;
+     * all keys that actually control live funds should be derived from the
+     * wallet's mnemonic seed.
+     */
+    static CKey TestOnlyRandomKey(bool fCompressedIn);
 
-    //! Destructor (again necessary because of memlocking).
-    ~CKey()
-    {
-        UnlockObject(vch);
-    }
+    //! Initialize from a CPrivKey (serialized OpenSSL-format private key data).
+    static std::optional<CKey> FromPrivKey(const CPrivKey& vchPrivKey, bool fCompressed);
+
+    /** Check that required EC support is available at runtime. */
+    static bool ECC_InitSanityCheck();
 
     friend bool operator==(const CKey& a, const CKey& b)
     {
-        return a.fCompressed == b.fCompressed && a.size() == b.size() &&
-               memcmp(&a.vch[0], &b.vch[0], a.size()) == 0;
+        return a.fCompressed == b.fCompressed &&
+            a.size() == b.size() &&
+            memcmp(a.keydata.data(), b.keydata.data(), a.size()) == 0;
     }
 
     //! Initialize using begin and end iterators to byte data.
     template <typename T>
     void Set(const T pbegin, const T pend, bool fCompressedIn)
     {
-        if (pend - pbegin != 32) {
+        if (size_t(pend - pbegin) != keydata.size()) {
             fValid = false;
-            return;
-        }
-        if (Check(&pbegin[0])) {
-            memcpy(vch, (unsigned char*)&pbegin[0], 32);
+        } else if (Check(&pbegin[0])) {
+            memcpy(keydata.data(), (unsigned char*)&pbegin[0], keydata.size());
             fValid = true;
             fCompressed = fCompressedIn;
         } else {
@@ -98,9 +97,9 @@ public:
     }
 
     //! Simple read-only vector-like interface.
-    unsigned int size() const { return (fValid ? 32 : 0); }
-    const unsigned char* begin() const { return vch; }
-    const unsigned char* end() const { return vch + size(); }
+    unsigned int size() const { return (fValid ? keydata.size() : 0); }
+    const unsigned char* begin() const { return keydata.data(); }
+    const unsigned char* end() const { return keydata.data() + size(); }
 
     //! Check whether this private key is valid.
     bool IsValid() const { return fValid; }
@@ -108,15 +107,9 @@ public:
     //! Check whether the public key corresponding to this private key is (to be) compressed.
     bool IsCompressed() const { return fCompressed; }
 
-    //! Initialize from a CPrivKey (serialized OpenSSL private key data).
-    bool SetPrivKey(const CPrivKey& vchPrivKey, bool fCompressed);
-
-    //! Generate a new private key using a cryptographic PRNG.
-    void MakeNewKey(bool fCompressed);
-
     /**
-     * Convert the private key to a CPrivKey (serialized OpenSSL private key data).
-     * This is expensive. 
+     * Convert the private key to a CPrivKey (serialized OpenSSL-format private key data).
+     * This is expensive.
      */
     CPrivKey GetPrivKey() const;
 
@@ -166,15 +159,19 @@ struct CExtKey {
 
     friend bool operator==(const CExtKey& a, const CExtKey& b)
     {
-        return a.nDepth == b.nDepth && memcmp(&a.vchFingerprint[0], &b.vchFingerprint[0], 4) == 0 && a.nChild == b.nChild &&
-               a.chaincode == b.chaincode && a.key == b.key;
+        return a.nDepth == b.nDepth &&
+            memcmp(&a.vchFingerprint[0], &b.vchFingerprint[0], sizeof(vchFingerprint)) == 0 &&
+            a.nChild == b.nChild &&
+            a.chaincode == b.chaincode &&
+            a.key == b.key;
     }
+
+    static std::optional<CExtKey> Master(const unsigned char* seed, unsigned int nSeedLen);
 
     void Encode(unsigned char code[BIP32_EXTKEY_SIZE]) const;
     void Decode(const unsigned char code[BIP32_EXTKEY_SIZE]);
-    bool Derive(CExtKey& out, unsigned int nChild) const;
+    std::optional<CExtKey> Derive(unsigned int nChild) const;
     CExtPubKey Neuter() const;
-    void SetMaster(const unsigned char* seed, unsigned int nSeedLen);
     template <typename Stream>
     void Serialize(Stream& s) const
     {
@@ -200,7 +197,5 @@ void ECC_Start(void);
 /** Deinitialize the elliptic curve support. No-op if ECC_Start wasn't called first. */
 void ECC_Stop(void);
 
-/** Check that required EC support is available at runtime. */
-bool ECC_InitSanityCheck(void);
 
 #endif // BITCOIN_KEY_H

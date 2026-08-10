@@ -1,6 +1,7 @@
 // Copyright (c) 2012-2014 The Bitcoin Core developers
+// Copyright (c) 2019-2023 The Zcash developers
 // Distributed under the MIT software license, see the accompanying
-// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+// file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 #ifndef BITCOIN_CHECKQUEUE_H
 #define BITCOIN_CHECKQUEUE_H
@@ -8,10 +9,11 @@
 #include <algorithm>
 #include <vector>
 
-#include <boost/foreach.hpp>
 #include <boost/thread/condition_variable.hpp>
 #include <boost/thread/locks.hpp>
 #include <boost/thread/mutex.hpp>
+
+#include "sync.h"
 
 template <typename T>
 class CCheckQueueControl;
@@ -119,7 +121,7 @@ private:
                 fOk = fAllOk;
             }
             // execute work
-            BOOST_FOREACH (T& check, vChecks)
+            for (T& check : vChecks)
                 if (fOk)
                     fOk = check();
             vChecks.clear();
@@ -127,6 +129,9 @@ private:
     }
 
 public:
+    //! Mutex to ensure only one concurrent CCheckQueueControl
+    boost::mutex ControlMutex;
+
     //! Create a new check queue
     CCheckQueue(unsigned int nBatchSizeIn) : nIdle(0), nTotal(0), fAllOk(true), nTodo(0), fQuit(false), nBatchSize(nBatchSizeIn) {}
 
@@ -146,7 +151,7 @@ public:
     void Add(std::vector<T>& vChecks)
     {
         boost::unique_lock<boost::mutex> lock(mutex);
-        BOOST_FOREACH (T& check, vChecks) {
+        for (T& check : vChecks) {
             queue.push_back(T());
             check.swap(queue.back());
         }
@@ -161,12 +166,6 @@ public:
     {
     }
 
-    bool IsIdle()
-    {
-        boost::unique_lock<boost::mutex> lock(mutex);
-        return (nTotal == nIdle && nTodo == 0 && fAllOk == true);
-    }
-
 };
 
 /** 
@@ -177,16 +176,18 @@ template <typename T>
 class CCheckQueueControl
 {
 private:
-    CCheckQueue<T>* pqueue;
+    CCheckQueue<T> * const pqueue;
     bool fDone;
 
 public:
-    CCheckQueueControl(CCheckQueue<T>* pqueueIn) : pqueue(pqueueIn), fDone(false)
+    CCheckQueueControl() = delete;
+    CCheckQueueControl(const CCheckQueueControl&) = delete;
+    CCheckQueueControl& operator=(const CCheckQueueControl&) = delete;
+    explicit CCheckQueueControl(CCheckQueue<T> * const pqueueIn) : pqueue(pqueueIn), fDone(false)
     {
         // passed queue is supposed to be unused, or NULL
         if (pqueue != NULL) {
-            bool isIdle = pqueue->IsIdle();
-            assert(isIdle);
+            ENTER_CRITICAL_SECTION(pqueue->ControlMutex);
         }
     }
 
@@ -209,6 +210,9 @@ public:
     {
         if (!fDone)
             Wait();
+        if (pqueue != NULL) {
+            LEAVE_CRITICAL_SECTION(pqueue->ControlMutex);
+        }
     }
 };
 

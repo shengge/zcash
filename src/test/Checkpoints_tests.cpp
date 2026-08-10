@@ -1,6 +1,7 @@
 // Copyright (c) 2011-2013 The Bitcoin Core developers
+// Copyright (c) 2016-2023 The Zcash developers
 // Distributed under the MIT software license, see the accompanying
-// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+// file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 //
 // Unit tests for block-chain checkpoints
@@ -16,7 +17,7 @@
 
 using namespace std;
 
-BOOST_FIXTURE_TEST_SUITE(Checkpoints_tests, BasicTestingSetup)
+BOOST_FIXTURE_TEST_SUITE(Checkpoints_tests, BasicTestingSetup) // DISABLED_TEST_SUITE
 
 // TODO: checkpoints have been removed for now.
 /*

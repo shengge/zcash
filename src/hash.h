@@ -1,7 +1,8 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2013 The Bitcoin Core developers
+// Copyright (c) 2018-2023 The Zcash developers
 // Distributed under the MIT software license, see the accompanying
-// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+// file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 #ifndef BITCOIN_HASH_H
 #define BITCOIN_HASH_H
@@ -13,9 +14,11 @@
 #include "uint256.h"
 #include "version.h"
 
-#include "sodium.h"
-
 #include <vector>
+
+#include <rust/blake2b.h>
+#include <rust/constants.h>
+#include <rust/cxx.h>
 
 typedef uint256 ChainCode;
 
@@ -27,9 +30,9 @@ public:
     static const size_t OUTPUT_SIZE = CSHA256::OUTPUT_SIZE;
 
     void Finalize(unsigned char hash[OUTPUT_SIZE]) {
-        unsigned char buf[sha.OUTPUT_SIZE];
+        unsigned char buf[CSHA256::OUTPUT_SIZE];
         sha.Finalize(buf);
-        sha.Reset().Write(buf, sha.OUTPUT_SIZE).Finalize(hash);
+        sha.Reset().Write(buf, CSHA256::OUTPUT_SIZE).Finalize(hash);
     }
 
     CHash256& Write(const unsigned char *data, size_t len) {
@@ -51,9 +54,9 @@ public:
     static const size_t OUTPUT_SIZE = CRIPEMD160::OUTPUT_SIZE;
 
     void Finalize(unsigned char hash[OUTPUT_SIZE]) {
-        unsigned char buf[sha.OUTPUT_SIZE];
+        unsigned char buf[CSHA256::OUTPUT_SIZE];
         sha.Finalize(buf);
-        CRIPEMD160().Write(buf, sha.OUTPUT_SIZE).Finalize(hash);
+        CRIPEMD160().Write(buf, CSHA256::OUTPUT_SIZE).Finalize(hash);
     }
 
     CHash160& Write(const unsigned char *data, size_t len) {
@@ -86,20 +89,6 @@ inline uint256 Hash(const T1 p1begin, const T1 p1end,
     uint256 result;
     CHash256().Write(p1begin == p1end ? pblank : (const unsigned char*)&p1begin[0], (p1end - p1begin) * sizeof(p1begin[0]))
               .Write(p2begin == p2end ? pblank : (const unsigned char*)&p2begin[0], (p2end - p2begin) * sizeof(p2begin[0]))
-              .Finalize((unsigned char*)&result);
-    return result;
-}
-
-/** Compute the 256-bit hash of the concatenation of three objects. */
-template<typename T1, typename T2, typename T3>
-inline uint256 Hash(const T1 p1begin, const T1 p1end,
-                    const T2 p2begin, const T2 p2end,
-                    const T3 p3begin, const T3 p3end) {
-    static const unsigned char pblank[1] = {};
-    uint256 result;
-    CHash256().Write(p1begin == p1end ? pblank : (const unsigned char*)&p1begin[0], (p1end - p1begin) * sizeof(p1begin[0]))
-              .Write(p2begin == p2end ? pblank : (const unsigned char*)&p2begin[0], (p2end - p2begin) * sizeof(p2begin[0]))
-              .Write(p3begin == p3end ? pblank : (const unsigned char*)&p3begin[0], (p3end - p3begin) * sizeof(p3begin[0]))
               .Finalize((unsigned char*)&result);
     return result;
 }
@@ -143,6 +132,11 @@ public:
     int GetType() const { return nType; }
     int GetVersion() const { return nVersion; }
 
+    void write_u8(const unsigned char* pch, size_t nSize)
+    {
+        ctx.Write(pch, nSize);
+    }
+
     void write(const char *pch, size_t size) {
         ctx.Write((const unsigned char*)pch, size);
     }
@@ -167,33 +161,34 @@ public:
 class CBLAKE2bWriter
 {
 private:
-    crypto_generichash_blake2b_state state;
+    rust::Box<blake2b::State> state;
 
 public:
     int nType;
     int nVersion;
 
-    CBLAKE2bWriter(int nTypeIn, int nVersionIn, const unsigned char* personal) : nType(nTypeIn), nVersion(nVersionIn) {
-        assert(crypto_generichash_blake2b_init_salt_personal(
-            &state,
-            NULL, 0, // No key.
-            32,
-            NULL,    // No salt.
-            personal) == 0);
-    }
+    CBLAKE2bWriter(int nTypeIn, int nVersionIn, const unsigned char* personal) :
+        nType(nTypeIn),
+        nVersion(nVersionIn),
+        state(blake2b::init(32, {personal, blake2b::PERSONALBYTES})) {}
 
     int GetType() const { return nType; }
     int GetVersion() const { return nVersion; }
 
+    void write_u8(const unsigned char* pch, size_t size)
+    {
+        state->update({pch, size});
+    }
+
     CBLAKE2bWriter& write(const char *pch, size_t size) {
-        crypto_generichash_blake2b_update(&state, (const unsigned char*)pch, size);
+        state->update({(const unsigned char*)pch, size});
         return (*this);
     }
 
     // invalidates the object
     uint256 GetHash() {
         uint256 result;
-        crypto_generichash_blake2b_final(&state, (unsigned char*)&result, 32);
+        state->finalize({result.begin(), result.size()});
         return result;
     }
 
@@ -218,5 +213,39 @@ uint256 SerializeHash(const T& obj, int nType=SER_GETHASH, int nVersion=PROTOCOL
 unsigned int MurmurHash3(unsigned int nHashSeed, const std::vector<unsigned char>& vDataToHash);
 
 void BIP32Hash(const ChainCode &chainCode, unsigned int nChild, unsigned char header, const unsigned char data[32], unsigned char output[64]);
+
+/** SipHash-2-4 */
+class CSipHasher
+{
+private:
+    uint64_t v[4];
+    uint64_t tmp;
+    int count;
+
+public:
+    /** Construct a SipHash calculator initialized with 128-bit key (k0, k1) */
+    CSipHasher(uint64_t k0, uint64_t k1);
+    /** Hash a 64-bit integer worth of data
+     *  It is treated as if this was the little-endian interpretation of 8 bytes.
+     *  This function can only be used when a multiple of 8 bytes have been written so far.
+     */
+    CSipHasher& Write(uint64_t data);
+    /** Hash arbitrary bytes. */
+    CSipHasher& Write(const unsigned char* data, size_t size);
+    /** Compute the 64-bit SipHash-2-4 of the data written so far. The object remains untouched. */
+    uint64_t Finalize() const;
+};
+
+/** Optimized SipHash-2-4 implementation for uint256.
+ *
+ *  It is identical to:
+ *    SipHasher(k0, k1)
+ *      .Write(val.GetUint64(0))
+ *      .Write(val.GetUint64(1))
+ *      .Write(val.GetUint64(2))
+ *      .Write(val.GetUint64(3))
+ *      .Finalize()
+ */
+uint64_t SipHashUint256(uint64_t k0, uint64_t k1, const uint256& val);
 
 #endif // BITCOIN_HASH_H

@@ -1,26 +1,27 @@
 // Copyright (c) 2010 Satoshi Nakamoto
 // Copyright (c) 2009-2014 The Bitcoin Core developers
+// Copyright (c) 2019-2023 The Zcash developers
 // Distributed under the MIT software license, see the accompanying
-// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+// file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 #include "rpc/server.h"
 
+#include "fs.h"
 #include "init.h"
 #include "key_io.h"
 #include "random.h"
+#include "rpc/common.h"
 #include "sync.h"
 #include "ui_interface.h"
-#include "util.h"
-#include "utilstrencodings.h"
+#include "util/system.h"
+#include "util/strencodings.h"
 #include "asyncrpcqueue.h"
 
 #include <memory>
 
 #include <univalue.h>
 
-#include <boost/bind.hpp>
-#include <boost/filesystem.hpp>
-#include <boost/foreach.hpp>
+#include <boost/bind/bind.hpp>
 #include <boost/iostreams/concepts.hpp>
 #include <boost/iostreams/stream.hpp>
 #include <boost/shared_ptr.hpp>
@@ -28,8 +29,11 @@
 #include <boost/thread.hpp>
 #include <boost/algorithm/string/case_conv.hpp> // for to_upper()
 
+#include <tracing.h>
+
 using namespace RPCServer;
 using namespace std;
+using namespace boost::placeholders;
 
 static bool fRPCRunning = false;
 static bool fRPCInWarmup = true;
@@ -46,27 +50,21 @@ static struct CRPCSignals
     boost::signals2::signal<void ()> Started;
     boost::signals2::signal<void ()> Stopped;
     boost::signals2::signal<void (const CRPCCommand&)> PreCommand;
-    boost::signals2::signal<void (const CRPCCommand&)> PostCommand;
 } g_rpcSignals;
 
-void RPCServer::OnStarted(boost::function<void ()> slot)
+void RPCServer::OnStarted(std::function<void ()> slot)
 {
     g_rpcSignals.Started.connect(slot);
 }
 
-void RPCServer::OnStopped(boost::function<void ()> slot)
+void RPCServer::OnStopped(std::function<void ()> slot)
 {
     g_rpcSignals.Stopped.connect(slot);
 }
 
-void RPCServer::OnPreCommand(boost::function<void (const CRPCCommand&)> slot)
+void RPCServer::OnPreCommand(std::function<void (const CRPCCommand&)> slot)
 {
     g_rpcSignals.PreCommand.connect(boost::bind(slot, _1));
-}
-
-void RPCServer::OnPostCommand(boost::function<void (const CRPCCommand&)> slot)
-{
-    g_rpcSignals.PostCommand.connect(boost::bind(slot, _1));
 }
 
 void RPCTypeCheck(const UniValue& params,
@@ -74,7 +72,7 @@ void RPCTypeCheck(const UniValue& params,
                   bool fAllowNull)
 {
     size_t i = 0;
-    BOOST_FOREACH(UniValue::VType t, typesExpected)
+    for (UniValue::VType t : typesExpected)
     {
         if (params.size() <= i)
             break;
@@ -94,7 +92,7 @@ void RPCTypeCheckObj(const UniValue& o,
                   const map<string, UniValue::VType>& typesExpected,
                   bool fAllowNull)
 {
-    BOOST_FOREACH(const PAIRTYPE(string, UniValue::VType)& t, typesExpected)
+    for (const std::pair<string, UniValue::VType>& t : typesExpected)
     {
         const UniValue& v = find_value(o, t.first);
         if (!fAllowNull && v.isNull())
@@ -175,7 +173,7 @@ std::string CRPCTable::help(const std::string& strCommand) const
         vCommands.push_back(make_pair(mi->second->category + mi->first, mi->second));
     sort(vCommands.begin(), vCommands.end());
 
-    BOOST_FOREACH(const PAIRTYPE(string, const CRPCCommand*)& command, vCommands)
+    for (const std::pair<string, const CRPCCommand*>& command : vCommands)
     {
         const CRPCCommand *pcmd = command.second;
         string strMethod = pcmd->name;
@@ -239,6 +237,47 @@ UniValue help(const UniValue& params, bool fHelp)
 }
 
 
+UniValue setlogfilter(const UniValue& params, bool fHelp)
+{
+    if (fHelp || params.size() > 1) {
+        throw runtime_error(
+            "setlogfilter \"directives\"\n"
+            "\nSets the filter to be used for selecting events to log.\n"
+            "\nA filter is a comma-separated list of directives.\n"
+            "The syntax for each directive is:\n"
+            "\n    target[span{field=value}]=level\n"
+            "\nThe default filter, derived from the -debug=target flags, is:\n"
+            + strprintf("\n    %s", LogConfigFilter()) + "\n"
+            "\nPassing a valid filter here will replace the existing filter.\n"
+            "Passing an empty string will reset the filter to the default.\n"
+            "\nNote that enabling trace-level events should always be considered\n"
+            "unsafe, as they can result in sensitive information like decrypted\n"
+            "notes and private keys being printed to the log output.\n"
+            "\nArguments:\n"
+            "1. newFilterDirectives (string, required) The new log filter.\n"
+            "\nExamples:\n"
+            + HelpExampleCli("setlogfilter", "\"main=info,rpc=info\"")
+            + HelpExampleRpc("setlogfilter", "\"main=info,rpc=info\"")
+        );
+    }
+
+    auto newFilter = params[0].getValStr();
+    if (newFilter.empty()) {
+        newFilter = LogConfigFilter();
+    }
+
+    if (pTracingHandle) {
+        TracingInfo("main", "Reloading log filter", "new_filter", newFilter.c_str());
+
+        if (!tracing_reload(pTracingHandle, newFilter.c_str())) {
+            throw JSONRPCError(RPC_INTERNAL_ERROR, "Filter reload failed; check logs");
+        }
+    }
+
+    return NullUniValue;
+}
+
+
 UniValue stop(const UniValue& params, bool fHelp)
 {
     // Accept the deprecated and ignored 'detach' boolean argument
@@ -260,6 +299,7 @@ static const CRPCCommand vRPCCommands[] =
   //  --------------------- ------------------------  -----------------------  ----------
     /* Overall control/query calls */
     { "control",            "help",                   &help,                   true  },
+    { "control",            "setlogfilter",           &setlogfilter,           true  },
     { "control",            "stop",                   &stop,                   true  },
 };
 
@@ -381,8 +421,7 @@ void JSONRequest::parse(const UniValue& valRequest)
     if (!valMethod.isStr())
         throw JSONRPCError(RPC_INVALID_REQUEST, "Method must be a string");
     strMethod = valMethod.get_str();
-    if (strMethod != "getblocktemplate")
-        LogPrint("rpc", "ThreadRPCServer method=%s\n", SanitizeString(strMethod));
+    LogPrint("rpc", "ThreadRPCServer method=%s\n", SanitizeString(strMethod));
 
     // Parse params
     UniValue valParams = find_value(request, "params");
@@ -446,14 +485,58 @@ UniValue CRPCTable::execute(const std::string &strMethod, const UniValue &params
     try
     {
         // Execute
-        return pcmd->actor(params, false);
+        auto paramRange = rpcCvtTable.find(strMethod);
+        if (paramRange != rpcCvtTable.end()) {
+            auto numRequired = paramRange->second.first.size();
+            auto numOptional = paramRange->second.second.size();
+            if (params.size() < numRequired || numRequired + numOptional < params.size()) {
+                std::string helpMsg;
+                try {
+                    // help gets thrown – if it doesn’t throw, then no help message
+                    pcmd->actor(params, true);
+                } catch (const std::runtime_error& err) {
+                    helpMsg = std::string("\n\n") + err.what();
+                }
+                throw JSONRPCError(
+                    RPC_INVALID_PARAMS,
+                    strprintf(
+                            "%s for method `%s`. Needed %s, but received %u%s",
+                            params.size() < numRequired
+                            ? "Not enough parameters"
+                            : "Too many parameters",
+                            strMethod,
+                            numOptional == 0
+                            ? strprintf("exactly %u", numRequired)
+                            : strprintf("at least %u and at most %u", numRequired, numRequired + numOptional),
+                            params.size(),
+                            helpMsg));
+            } else {
+                return pcmd->actor(params, false);
+            }
+        } else {
+            throw JSONRPCError(
+                    RPC_INTERNAL_ERROR,
+                    "Parameters for "
+                    + strMethod
+                    + " not found – this is an internal error, please report it.");
+        }
+
     }
     catch (const std::exception& e)
     {
         throw JSONRPCError(RPC_MISC_ERROR, e.what());
     }
+}
 
-    g_rpcSignals.PostCommand(*pcmd);
+std::vector<std::string> CRPCTable::listCommands() const
+{
+    std::vector<std::string> commandList;
+    typedef std::map<std::string, const CRPCCommand*> commandMap;
+
+    std::transform( mapCommands.begin(), mapCommands.end(),
+                   std::back_inserter(commandList),
+                   boost::bind(&commandMap::value_type::first,_1) );
+    return commandList;
 }
 
 std::string HelpExampleCli(const std::string& methodname, const std::string& args)
@@ -467,14 +550,81 @@ std::string HelpExampleRpc(const std::string& methodname, const std::string& arg
         "\"method\": \"" + methodname + "\", \"params\": [" + args + "] }' -H 'content-type: text/plain;' http://127.0.0.1:8232/\n";
 }
 
-string experimentalDisabledHelpMsg(const string& rpc, const string& enableArg)
+std::string experimentalDisabledHelpMsg(const std::string& rpc, const std::vector<string>& enableArgs)
 {
-    return "\nWARNING: " + rpc + " is disabled.\n"
-        "To enable it, restart zcashd with the -experimentalfeatures and\n"
-        "-" + enableArg + " commandline options, or add these two lines\n"
-        "to the zcash.conf file:\n\n"
-        "experimentalfeatures=1\n"
-        + enableArg + "=1\n";
+    std::string cmd, config = "";
+    const auto size = enableArgs.size();
+    assert(size > 0);
+
+    for (size_t i = 0; i < size; ++i)
+    {
+        if (size == 1 || i == 0)
+        {
+            cmd += "-experimentalfeatures and -" + enableArgs.at(i);
+            config += "experimentalfeatures=1\n";
+            config += enableArgs.at(i) + "=1\n";
+        }
+        else {
+            cmd += " or:\n-experimentalfeatures and -" + enableArgs.at(i);
+            config += "\nor:\n\n";
+            config += "experimentalfeatures=1\n";
+            config += enableArgs.at(i) + "=1\n";
+        }
+    }
+    return "\nWARNING: " + rpc + " is disabled.\n" +
+        "To enable it, restart zcashd with the following command line options:\n"
+        + cmd + "\n\n" +
+        "Alternatively add these two lines to the zcash.conf file:\n\n"
+        + config;
+}
+
+std::string asOfHeightMessage(bool hasMinconf) {
+    std::string minconfInteraction = hasMinconf
+        ? "                    `minconf` must be at least 1 when `asOfHeight` is provided.\n"
+        : "";
+    return
+        "asOfHeight       (numeric, optional, default=-1) Execute the query as if it\n"
+        "                    were run when the blockchain was at the height specified by\n"
+        "                    this argument. The default is to use the entire blockchain\n"
+        "                    that the node is aware of. -1 can be used as in other RPC\n"
+        "                    calls to indicate the current height (including the\n"
+        "                    mempool), but this does not support negative values in\n"
+        "                    general. A “future” height will fall back to the current\n"
+        "                    height. Any explicit value will cause the mempool to be\n"
+        "                    ignored, meaning no unconfirmed tx will be considered.\n"
+        + minconfInteraction;
+}
+
+std::optional<int> parseAsOfHeight(const UniValue& params, int index) {
+    std::optional<int> asOfHeight;
+    if (params.size() > index) {
+        auto requestedHeight = params[index].get_int();
+        if (requestedHeight == -1) {
+            // the default, do nothing
+        } else if (requestedHeight < 0) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Can not perform the query as of a negative block height");
+        } else if (requestedHeight == 0) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Can not perform the query as of the genesis block");
+        } else {
+            asOfHeight = requestedHeight;
+        }
+    }
+    return asOfHeight;
+}
+
+int parseMinconf(int defaultValue, const UniValue& params, int index, const std::optional<int>& asOfHeight) {
+    int nMinDepth = defaultValue;
+    if (params.size() > index) {
+        auto requestedDepth = params[index].get_int();
+        if (requestedDepth < 0) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Minimum number of confirmations cannot be less than 0");
+        } else if (requestedDepth == 0 && asOfHeight.has_value()) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Require a minimum of 1 confirmation when `asOfHeight` is provided");
+        } else {
+            nMinDepth = requestedDepth;
+        }
+    }
+    return nMinDepth;
 }
 
 void RPCRegisterTimerInterface(RPCTimerInterface *iface)
@@ -489,7 +639,7 @@ void RPCUnregisterTimerInterface(RPCTimerInterface *iface)
     timerInterfaces.erase(i);
 }
 
-void RPCRunLater(const std::string& name, boost::function<void(void)> func, int64_t nSeconds)
+void RPCRunLater(const std::string& name, std::function<void(void)> func, int64_t nSeconds)
 {
     if (timerInterfaces.empty())
         throw JSONRPCError(RPC_INTERNAL_ERROR, "No timer handler registered for RPC");
@@ -505,4 +655,20 @@ CRPCTable tableRPC;
 std::shared_ptr<AsyncRPCQueue> getAsyncRPCQueue()
 {
     return AsyncRPCQueue::sharedInstance();
+}
+
+void AddMemo(UniValue &obj, const std::optional<libzcash::Memo> &memo)
+{
+    obj.pushKV("memo", HexStr(libzcash::Memo::ToBytes(memo)));
+
+    if (memo.has_value()) {
+        auto interpMemo = memo.value().Interpret();
+        // TODO: Indicate when the memo should have been valid UTF8, but wasn’t.
+        if (interpMemo.has_value()) {
+            examine(interpMemo.value(), match {
+                [&](const std::string& memoStr) { obj.pushKV("memoStr", memoStr); },
+                [](const auto&) {},
+            });
+        }
+    }
 }

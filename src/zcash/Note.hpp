@@ -5,11 +5,18 @@
 #include "Zcash.h"
 #include "Address.hpp"
 #include "NoteEncryption.hpp"
+#include "consensus/params.h"
+#include "consensus/consensus.h"
+#include "zcash/memo.h"
 
 #include <array>
-#include <boost/optional.hpp>
+#include <optional>
+
+#include <rust/bridge.h>
 
 namespace libzcash {
+
+typedef std::array<uint8_t, 32> nullifier_t;
 
 class BaseNote {
 protected:
@@ -40,38 +47,50 @@ public:
     uint256 nullifier(const SproutSpendingKey& a_sk) const;
 };
 
+enum class Zip212Enabled {
+    BeforeZip212,
+    AfterZip212
+};
 
 class SaplingNote : public BaseNote {
+private:
+    uint256 rseed;
+    friend class SaplingNotePlaintext;
+    Zip212Enabled zip_212_enabled;
 public:
     diversifier_t d;
     uint256 pk_d;
-    uint256 r;
 
-    SaplingNote(diversifier_t d, uint256 pk_d, uint64_t value, uint256 r)
-            : BaseNote(value), d(d), pk_d(pk_d), r(r) {}
+    SaplingNote(diversifier_t d, uint256 pk_d, uint64_t value, uint256 rseed, Zip212Enabled zip_212_enabled)
+            : BaseNote(value), d(d), pk_d(pk_d), rseed(rseed), zip_212_enabled(zip_212_enabled) {}
 
-    SaplingNote() {};
-
-    SaplingNote(const SaplingPaymentAddress &address, uint64_t value);
+    SaplingNote(const SaplingPaymentAddress &address, uint64_t value, Zip212Enabled zip_212_enabled);
 
     virtual ~SaplingNote() {};
 
-    boost::optional<uint256> cm() const;
-    boost::optional<uint256> nullifier(const SaplingFullViewingKey &vk, const uint64_t position) const;
+    std::optional<uint256> cmu() const;
+    std::optional<uint256> nullifier(const SaplingFullViewingKey &vk, const uint64_t position) const;
+    uint256 rcm() const;
+
+    Zip212Enabled get_zip_212_enabled() const {
+        return zip_212_enabled;
+    }
 };
 
 class BaseNotePlaintext {
 protected:
     uint64_t value_ = 0;
-    std::array<unsigned char, ZC_MEMO_SIZE> memo_;
+    /// This needs to hold the `Memo::Bytes` directly because we encrypt the in-memory
+    /// representation of this class.
+    Memo::Bytes memo_;
 public:
     BaseNotePlaintext() {}
-    BaseNotePlaintext(const BaseNote& note, std::array<unsigned char, ZC_MEMO_SIZE> memo)
-        : value_(note.value()), memo_(memo) {}
+    BaseNotePlaintext(const BaseNote& note, const std::optional<Memo>& memo)
+        : value_(note.value()), memo_(Memo::ToBytes(memo)) {}
     virtual ~BaseNotePlaintext() {}
 
     inline uint64_t value() const { return value_; }
-    inline const std::array<unsigned char, ZC_MEMO_SIZE> & memo() const { return memo_; }
+    inline std::optional<Memo> memo() const { return Memo::FromBytes(memo_); }
 };
 
 class SproutNotePlaintext : public BaseNotePlaintext {
@@ -81,7 +100,7 @@ public:
 
     SproutNotePlaintext() {}
 
-    SproutNotePlaintext(const SproutNote& note, std::array<unsigned char, ZC_MEMO_SIZE> memo);
+    SproutNotePlaintext(const SproutNote& note, const std::optional<Memo>& memo);
 
     SproutNote note(const SproutPaymentAddress& addr) const;
 
@@ -91,10 +110,10 @@ public:
 
     template <typename Stream, typename Operation>
     inline void SerializationOp(Stream& s, Operation ser_action) {
-        unsigned char leadingByte = 0x00;
-        READWRITE(leadingByte);
+        unsigned char leadbyte = 0x00;
+        READWRITE(leadbyte);
 
-        if (leadingByte != 0x00) {
+        if (leadbyte != 0x00) {
             throw std::ios_base::failure("lead byte of SproutNotePlaintext is not recognized");
         }
 
@@ -116,33 +135,21 @@ public:
                                         ) const;
 };
 
-typedef std::pair<SaplingEncCiphertext, SaplingNoteEncryption> SaplingNotePlaintextEncryptionResult;
-
 class SaplingNotePlaintext : public BaseNotePlaintext {
+private:
+    uint256 rseed;
+    unsigned char leadbyte;
 public:
     diversifier_t d;
-    uint256 rcm;
 
     SaplingNotePlaintext() {}
 
-    SaplingNotePlaintext(const SaplingNote& note, std::array<unsigned char, ZC_MEMO_SIZE> memo);
+    SaplingNotePlaintext(const SaplingNote& note, const std::optional<Memo>& memo);
 
-    static boost::optional<SaplingNotePlaintext> decrypt(
-        const SaplingEncCiphertext &ciphertext,
-        const uint256 &ivk,
-        const uint256 &epk,
-        const uint256 &cmu
-    );
+    static std::pair<SaplingNotePlaintext, SaplingPaymentAddress> from_rust(
+        rust::Box<wallet::DecryptedSaplingOutput> decrypted);
 
-    static boost::optional<SaplingNotePlaintext> decrypt(
-        const SaplingEncCiphertext &ciphertext,
-        const uint256 &epk,
-        const uint256 &esk,
-        const uint256 &pk_d,
-        const uint256 &cmu
-    );
-
-    boost::optional<SaplingNote> note(const SaplingIncomingViewingKey& ivk) const;
+    std::optional<SaplingNote> note(const SaplingIncomingViewingKey& ivk) const;
 
     virtual ~SaplingNotePlaintext() {}
 
@@ -150,20 +157,19 @@ public:
 
     template <typename Stream, typename Operation>
     inline void SerializationOp(Stream& s, Operation ser_action) {
-        unsigned char leadingByte = 0x01;
-        READWRITE(leadingByte);
+        READWRITE(leadbyte);
 
-        if (leadingByte != 0x01) {
+        if (leadbyte != 0x01 && leadbyte != 0x02) {
             throw std::ios_base::failure("lead byte of SaplingNotePlaintext is not recognized");
         }
 
         READWRITE(d);           // 11 bytes
         READWRITE(value_);      // 8 bytes
-        READWRITE(rcm);         // 32 bytes
+        READWRITE(rseed);       // 32 bytes
         READWRITE(memo_);       // 512 bytes
     }
 
-    boost::optional<SaplingNotePlaintextEncryptionResult> encrypt(const uint256& pk_d) const;
+    uint256 rcm() const;
 };
 
 class SaplingOutgoingPlaintext
@@ -183,21 +189,6 @@ public:
         READWRITE(pk_d);        // 8 bytes
         READWRITE(esk);         // 8 bytes
     }
-
-    static boost::optional<SaplingOutgoingPlaintext> decrypt(
-        const SaplingOutCiphertext &ciphertext,
-        const uint256& ovk,
-        const uint256& cv,
-        const uint256& cm,
-        const uint256& epk
-    );
-
-    SaplingOutCiphertext encrypt(
-        const uint256& ovk,
-        const uint256& cv,
-        const uint256& cm,
-        SaplingNoteEncryption& enc
-    ) const;
 };
 
 

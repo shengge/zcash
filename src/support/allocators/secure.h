@@ -1,13 +1,16 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2013 The Bitcoin Core developers
+// Copyright (c) 2019-2023 The Zcash developers
 // Distributed under the MIT software license, see the accompanying
-// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+// file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 #ifndef BITCOIN_SUPPORT_ALLOCATORS_SECURE_H
 #define BITCOIN_SUPPORT_ALLOCATORS_SECURE_H
 
-#include "support/pagelocker.h"
+#include "support/lockedpool.h"
+#include "support/cleanse.h"
 
+#include <memory>
 #include <string>
 
 //
@@ -16,22 +19,20 @@
 //
 template <typename T>
 struct secure_allocator : public std::allocator<T> {
-    // MSVC8 default copy constructor is broken
-    typedef std::allocator<T> base;
-    typedef typename base::size_type size_type;
-    typedef typename base::difference_type difference_type;
-    typedef typename base::pointer pointer;
-    typedef typename base::const_pointer const_pointer;
-    typedef typename base::reference reference;
-    typedef typename base::const_reference const_reference;
-    typedef typename base::value_type value_type;
-    secure_allocator() throw() {}
-    secure_allocator(const secure_allocator& a) throw() : base(a) {}
+    using base = std::allocator<T>;
+    using traits = std::allocator_traits<base>;
+    using size_type = typename traits::size_type;
+    using difference_type = typename traits::difference_type;
+    using pointer = typename traits::pointer;
+    using const_pointer = typename traits::const_pointer;
+    using value_type = typename traits::value_type;
+    secure_allocator() noexcept {}
+    secure_allocator(const secure_allocator& a) noexcept : base(a) {}
     template <typename U>
-    secure_allocator(const secure_allocator<U>& a) throw() : base(a)
+    secure_allocator(const secure_allocator<U>& a) noexcept : base(a)
     {
     }
-    ~secure_allocator() throw() {}
+    ~secure_allocator() noexcept {}
     template <typename _Other>
     struct rebind {
         typedef secure_allocator<_Other> other;
@@ -39,20 +40,18 @@ struct secure_allocator : public std::allocator<T> {
 
     T* allocate(std::size_t n, const void* hint = 0)
     {
-        T* p;
-        p = std::allocator<T>::allocate(n, hint);
-        if (p != NULL)
-            LockedPageManager::Instance().LockRange(p, sizeof(T) * n);
-        return p;
+        T* allocation = static_cast<T*>(LockedPoolManager::Instance().alloc(sizeof(T) * n));
+        if (!allocation) {
+            throw std::bad_alloc();
+        }
+        return allocation;
     }
 
-    void deallocate(T* p, std::size_t n)
+    void deallocate(T* p, std::size_t n) noexcept
     {
-        if (p != NULL) {
-            memory_cleanse(p, sizeof(T) * n);
-            LockedPageManager::Instance().UnlockRange(p, sizeof(T) * n);
-        }
-        std::allocator<T>::deallocate(p, n);
+        assert(p != nullptr);
+        memory_cleanse(p, sizeof(T) * n);
+        LockedPoolManager::Instance().free(p);
     }
 };
 

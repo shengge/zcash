@@ -1,6 +1,7 @@
 // Copyright (c) 2015 The Bitcoin Core developers
+// Copyright (c) 2016-2023 The Zcash developers
 // Distributed under the MIT software license, see the accompanying
-// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+// file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 #ifndef BITCOIN_REVERSELOCK_H
 #define BITCOIN_REVERSELOCK_H
@@ -13,9 +14,9 @@ class reverse_lock
 {
 public:
 
-    explicit reverse_lock(Lock& lock) : lock(lock) {
-        lock.unlock();
-        lock.swap(templock);
+    explicit reverse_lock(Lock& _lock) : lock(_lock) {
+        _lock.unlock();
+        _lock.swap(templock);
     }
 
     ~reverse_lock() {

@@ -1,7 +1,8 @@
-#!/usr/bin/env python2
-# Copyright (c) 2014 The Bitcoin Core developers
+#!/usr/bin/env python3
+# Copyright (c) 2014-2016 The Bitcoin Core developers
+# Copyright (c) 2016-2024 The Zcash developers
 # Distributed under the MIT software license, see the accompanying
-# file COPYING or http://www.opensource.org/licenses/mit-license.php.
+# file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 #
 # Test resurrection of mined transactions when
@@ -10,14 +11,25 @@
 
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import assert_equal, start_node
+from test_framework.zip317 import conventional_fee
+
+from decimal import Decimal
 
 
 # Create one-input, one-output, no-fee transaction:
 class MempoolCoinbaseTest(BitcoinTestFramework):
 
+    def __init__(self):
+        super().__init__()
+        self.num_nodes = 1
+
     def setup_network(self):
         # Just need one node for this test
-        args = ["-checkmempool", "-debug=mempool"]
+        args = [
+            '-checkmempool',
+            '-debug=mempool',
+            '-allowdeprecated=getnewaddress',
+        ]
         self.nodes = []
         self.nodes.append(start_node(0, self.options.tmpdir, args))
         self.is_network_split = False
@@ -44,16 +56,18 @@ class MempoolCoinbaseTest(BitcoinTestFramework):
 
         b = [ self.nodes[0].getblockhash(n) for n in range(1, 4) ]
         coinbase_txids = [ self.nodes[0].getblock(h)['tx'][0] for h in b ]
-        spends1_raw = [ self.create_tx(txid, node0_address, 10) for txid in coinbase_txids ]
+        fee = conventional_fee(1)
+        spends1_raw = [ self.create_tx(txid, node0_address, Decimal('10') - fee) for txid in coinbase_txids ]
         spends1_id = [ self.nodes[0].sendrawtransaction(tx) for tx in spends1_raw ]
 
         blocks = []
         blocks.extend(self.nodes[0].generate(1))
 
-        spends2_raw = [ self.create_tx(txid, node0_address, 9.999) for txid in spends1_id ]
+        spends2_raw = [ self.create_tx(txid, node0_address, Decimal('10') - 2*fee) for txid in spends1_id ]
         spends2_id = [ self.nodes[0].sendrawtransaction(tx) for tx in spends2_raw ]
 
         blocks.extend(self.nodes[0].generate(1))
+        self.sync_all()
 
         # mempool should be empty, all txns confirmed
         assert_equal(set(self.nodes[0].getrawmempool()), set())
@@ -74,6 +88,8 @@ class MempoolCoinbaseTest(BitcoinTestFramework):
 
         # Generate another block, they should all get mined
         self.nodes[0].generate(1)
+        self.sync_all()
+
         # mempool should be empty, all txns confirmed
         assert_equal(set(self.nodes[0].getrawmempool()), set())
         for txid in spends1_id+spends2_id:

@@ -1,15 +1,22 @@
-#!/usr/bin/env python2
-# Copyright (c) 2014 The Bitcoin Core developers
+#!/usr/bin/env python3
+# Copyright (c) 2014-2016 The Bitcoin Core developers
+# Copyright (c) 2016-2024 The Zcash developers
 # Distributed under the MIT software license, see the accompanying
-# file COPYING or http://www.opensource.org/licenses/mit-license.php.
+# file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 #
 # Test proper accounting with malleable transactions
 #
 
 from test_framework.test_framework import BitcoinTestFramework
-from test_framework.util import assert_equal, connect_nodes, \
-    sync_blocks, gather_inputs
+from test_framework.util import (
+    assert_equal,
+    connect_nodes,
+    start_nodes,
+    sync_blocks,
+    gather_inputs,
+)
+from test_framework.zip317 import conventional_fee
 
 
 class TxnMallTest(BitcoinTestFramework):
@@ -17,6 +24,11 @@ class TxnMallTest(BitcoinTestFramework):
     def add_options(self, parser):
         parser.add_option("--mineblock", dest="mine_block", default=False, action="store_true",
                           help="Test double-spend of 1-confirmed transaction")
+
+    def setup_nodes(self):
+        return start_nodes(self.num_nodes, self.options.tmpdir, extra_args=[[
+            '-allowdeprecated=getnewaddress',
+        ]] * self.num_nodes)
 
     def setup_network(self):
         # Start with split network:
@@ -33,13 +45,15 @@ class TxnMallTest(BitcoinTestFramework):
         # Coins are sent to node1_address
         node1_address = self.nodes[1].getnewaddress("")
 
-        # First: use raw transaction API to send (starting_balance - (mining_reward - 2)) BTC to node1_address,
+        # First: use raw transaction API to send (starting_balance - (mining_reward - 2)) ZEC to node1_address,
         # but don't broadcast:
         (total_in, inputs) = gather_inputs(self.nodes[0], (starting_balance - (mining_reward - 2)))
+        fee = conventional_fee(25)
         change_address = self.nodes[0].getnewaddress("")
-        outputs = {}
-        outputs[change_address] = (mining_reward - 2)
-        outputs[node1_address] = (starting_balance - (mining_reward - 2))
+        outputs = {
+            change_address: mining_reward - 2 - fee,
+            node1_address: starting_balance - (mining_reward - 2),
+        }
         rawtx = self.nodes[0].createrawtransaction(inputs, outputs)
         doublespend = self.nodes[0].signrawtransaction(rawtx)
         assert_equal(doublespend["complete"], True)
@@ -47,8 +61,8 @@ class TxnMallTest(BitcoinTestFramework):
         # Create two transaction from node[0] to node[1]; the
         # second must spend change from the first because the first
         # spends all mature inputs:
-        txid1 = self.nodes[0].sendfrom("", node1_address, (starting_balance - (mining_reward - 2)), 0)
-        txid2 = self.nodes[0].sendfrom("", node1_address, 5, 0)
+        txid1 = self.nodes[0].sendtoaddress(node1_address, (starting_balance - (mining_reward - 2)))
+        txid2 = self.nodes[0].sendtoaddress(node1_address, 5)
 
         # Have node0 mine a block:
         if (self.options.mine_block):
@@ -70,7 +84,7 @@ class TxnMallTest(BitcoinTestFramework):
             assert_equal(tx1["confirmations"], 1)
             assert_equal(tx2["confirmations"], 1)
             # Node1's total balance should be its starting balance plus both transaction amounts:
-            assert_equal(self.nodes[1].getbalance(""), starting_balance - (tx1["amount"]+tx2["amount"]))
+            assert_equal(self.nodes[1].getbalance("*"), starting_balance - (tx1["amount"] + tx2["amount"]))
         else:
             assert_equal(tx1["confirmations"], 0)
             assert_equal(tx2["confirmations"], 0)
@@ -93,14 +107,14 @@ class TxnMallTest(BitcoinTestFramework):
         assert_equal(tx1["confirmations"], -1)
         assert_equal(tx2["confirmations"], -1)
 
-        # Node0's total balance should be starting balance, plus (mining_reward * 2) for
-        # two more matured blocks, minus (starting_balance - (mining_reward - 2)) for the double-spend:
-        expected = starting_balance + (mining_reward * 2) - (starting_balance - (mining_reward - 2))
+        # Node0's total balance should be starting balance, plus (mining_reward * 2) for two more
+        # matured blocks, minus (starting_balance - (mining_reward - 2) + fee) for the double-spend.
+        expected = starting_balance + (mining_reward * 2) - (starting_balance - (mining_reward - 2) + fee)
         assert_equal(self.nodes[0].getbalance(), expected)
         assert_equal(self.nodes[0].getbalance("*"), expected)
 
         # Node1's total balance should be its starting balance plus the amount of the mutated send:
-        assert_equal(self.nodes[1].getbalance(""), starting_balance + (starting_balance - (mining_reward - 2)))
+        assert_equal(self.nodes[1].getbalance("*"), starting_balance + (starting_balance - (mining_reward - 2)))
 
 if __name__ == '__main__':
     TxnMallTest().main()

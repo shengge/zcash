@@ -1,40 +1,32 @@
-// Copyright (c) 2017 The Zcash developers
+// Copyright (c) 2017-2023 The Zcash developers
 // Distributed under the MIT software license, see the accompanying
-// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+// file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
-#ifndef ASYNCRPCOPERATION_MERGETOADDRESS_H
-#define ASYNCRPCOPERATION_MERGETOADDRESS_H
+#ifndef ZCASH_WALLET_ASYNCRPCOPERATION_MERGETOADDRESS_H
+#define ZCASH_WALLET_ASYNCRPCOPERATION_MERGETOADDRESS_H
 
 #include "amount.h"
 #include "asyncrpcoperation.h"
-#include "paymentdisclosure.h"
 #include "primitives/transaction.h"
 #include "transaction_builder.h"
+#include "uint256.h"
 #include "wallet.h"
+#include "wallet/paymentdisclosure.h"
+#include "wallet/wallet_tx_builder.h"
 #include "zcash/Address.hpp"
 #include "zcash/JoinSplit.hpp"
+#include "zcash/memo.h"
 
 #include <array>
+#include <optional>
 #include <tuple>
 #include <unordered_map>
 
 #include <univalue.h>
 
-// Default transaction fee if caller does not specify one.
-#define MERGE_TO_ADDRESS_OPERATION_DEFAULT_MINERS_FEE 10000
+#include <rust/ed25519.h>
 
 using namespace libzcash;
-
-// Input UTXO is a tuple of txid, vout, amount, script
-typedef std::tuple<COutPoint, CAmount, CScript> MergeToAddressInputUTXO;
-
-// Input JSOP is a tuple of JSOutpoint, note, amount, spending key
-typedef std::tuple<JSOutPoint, SproutNote, CAmount, SproutSpendingKey> MergeToAddressInputSproutNote;
-
-typedef std::tuple<SaplingOutPoint, SaplingNote, CAmount, SaplingExpandedSpendingKey> MergeToAddressInputSaplingNote;
-
-// A recipient is a tuple of address, memo (optional if zaddr)
-typedef std::tuple<std::string, std::string> MergeToAddressRecipient;
 
 // Package of info which is passed to perform_joinsplit methods.
 struct MergeToAddressJSInfo {
@@ -48,7 +40,7 @@ struct MergeToAddressJSInfo {
 
 // A struct to help us track the witness and anchor for a given JSOutPoint
 struct MergeToAddressWitnessAnchorData {
-    boost::optional<SproutWitness> witness;
+    std::optional<SproutWitness> witness;
     uint256 anchor;
 };
 
@@ -56,14 +48,10 @@ class AsyncRPCOperation_mergetoaddress : public AsyncRPCOperation
 {
 public:
     AsyncRPCOperation_mergetoaddress(
-        boost::optional<TransactionBuilder> builder,
-        CMutableTransaction contextualTx,
-        std::vector<MergeToAddressInputUTXO> utxoInputs,
-        std::vector<MergeToAddressInputSproutNote> sproutNoteInputs,
-        std::vector<MergeToAddressInputSaplingNote> saplingNoteInputs,
-        MergeToAddressRecipient recipient,
-        CAmount fee = MERGE_TO_ADDRESS_OPERATION_DEFAULT_MINERS_FEE,
-        UniValue contextInfo = NullUniValue);
+            CWallet& wallet,
+            TransactionStrategy strategy,
+            TransactionEffects effects,
+            UniValue contextInfo = NullUniValue);
     virtual ~AsyncRPCOperation_mergetoaddress();
 
     // We don't want to be copied or moved around
@@ -76,126 +64,16 @@ public:
 
     virtual UniValue getStatus() const;
 
-    bool testmode = false; // Set to true to disable sending txs and generating proofs
-
-    bool paymentDisclosureMode = false; // Set to true to save esk for encrypted notes in payment disclosure database.
+    /// Set to true to disable sending txs and generating proofs
+    bool testmode = false;
 
 private:
-    friend class TEST_FRIEND_AsyncRPCOperation_mergetoaddress; // class for unit testing
+    const TransactionStrategy strategy_;
 
-    UniValue contextinfo_; // optional data to include in return value from getStatus()
-    
-    bool isUsingBuilder_; // Indicates that no Sprout addresses are involved
-    uint32_t consensusBranchId_;
-    CAmount fee_;
-    int mindepth_;
-    MergeToAddressRecipient recipient_;
-    bool isToTaddr_;
-    bool isToZaddr_;
-    CTxDestination toTaddr_;
-    PaymentAddress toPaymentAddress_;
+    const TransactionEffects effects_;
 
-    uint256 joinSplitPubKey_;
-    unsigned char joinSplitPrivKey_[crypto_sign_SECRETKEYBYTES];
-
-    // The key is the result string from calling JSOutPoint::ToString()
-    std::unordered_map<std::string, MergeToAddressWitnessAnchorData> jsopWitnessAnchorMap;
-
-    std::vector<MergeToAddressInputUTXO> utxoInputs_;
-    std::vector<MergeToAddressInputSproutNote> sproutNoteInputs_;
-    std::vector<MergeToAddressInputSaplingNote> saplingNoteInputs_;
-
-    TransactionBuilder builder_;
-    CTransaction tx_;
-
-    std::array<unsigned char, ZC_MEMO_SIZE> get_memo_from_hex_string(std::string s);
-    bool main_impl();
-
-    // JoinSplit without any input notes to spend
-    UniValue perform_joinsplit(MergeToAddressJSInfo&);
-
-    // JoinSplit with input notes to spend (JSOutPoints))
-    UniValue perform_joinsplit(MergeToAddressJSInfo&, std::vector<JSOutPoint>&);
-
-    // JoinSplit where you have the witnesses and anchor
-    UniValue perform_joinsplit(
-        MergeToAddressJSInfo& info,
-        std::vector<boost::optional<SproutWitness>> witnesses,
-        uint256 anchor);
-
-    void sign_send_raw_transaction(UniValue obj); // throws exception if there was an error
-
-    void lock_utxos();
-
-    void unlock_utxos();
-
-    void lock_notes();
-
-    void unlock_notes();
-
-    // payment disclosure!
-    std::vector<PaymentDisclosureKeyInfo> paymentDisclosureData_;
+    /// optional data to include in return value from getStatus()
+    UniValue contextinfo_;
 };
 
-
-// To test private methods, a friend class can act as a proxy
-class TEST_FRIEND_AsyncRPCOperation_mergetoaddress
-{
-public:
-    std::shared_ptr<AsyncRPCOperation_mergetoaddress> delegate;
-
-    TEST_FRIEND_AsyncRPCOperation_mergetoaddress(std::shared_ptr<AsyncRPCOperation_mergetoaddress> ptr) : delegate(ptr) {}
-
-    CTransaction getTx()
-    {
-        return delegate->tx_;
-    }
-
-    void setTx(CTransaction tx)
-    {
-        delegate->tx_ = tx;
-    }
-
-    // Delegated methods
-
-    std::array<unsigned char, ZC_MEMO_SIZE> get_memo_from_hex_string(std::string s)
-    {
-        return delegate->get_memo_from_hex_string(s);
-    }
-
-    bool main_impl()
-    {
-        return delegate->main_impl();
-    }
-
-    UniValue perform_joinsplit(MergeToAddressJSInfo& info)
-    {
-        return delegate->perform_joinsplit(info);
-    }
-
-    UniValue perform_joinsplit(MergeToAddressJSInfo& info, std::vector<JSOutPoint>& v)
-    {
-        return delegate->perform_joinsplit(info, v);
-    }
-
-    UniValue perform_joinsplit(
-        MergeToAddressJSInfo& info,
-        std::vector<boost::optional<SproutWitness>> witnesses,
-        uint256 anchor)
-    {
-        return delegate->perform_joinsplit(info, witnesses, anchor);
-    }
-
-    void sign_send_raw_transaction(UniValue obj)
-    {
-        delegate->sign_send_raw_transaction(obj);
-    }
-
-    void set_state(OperationStatus state)
-    {
-        delegate->state_.store(state);
-    }
-};
-
-
-#endif /* ASYNCRPCOPERATION_MERGETOADDRESS_H */
+#endif // ZCASH_WALLET_ASYNCRPCOPERATION_MERGETOADDRESS_H

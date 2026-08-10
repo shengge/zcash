@@ -1,16 +1,19 @@
 // Copyright (c) 2010 Satoshi Nakamoto
 // Copyright (c) 2009-2014 The Bitcoin Core developers
+// Copyright (c) 2017-2023 The Zcash developers
 // Distributed under the MIT software license, see the accompanying
-// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+// file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 #include "noui.h"
 
 #include "ui_interface.h"
-#include "util.h"
+#include "util/system.h"
 
 #include <cstdio>
 #include <stdint.h>
 #include <string>
+
+#include <boost/signals2/connection.hpp>
 
 static bool noui_ThreadSafeMessageBox(const std::string& message, const std::string& caption, unsigned int style)
 {

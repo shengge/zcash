@@ -1,4 +1,4 @@
-#! /usr/bin/env python2
+#!/usr/bin/env python3
 
 import os
 import re
@@ -9,7 +9,8 @@ import subprocess
 import traceback
 import unittest
 import random
-from cStringIO import StringIO
+from datetime import date, datetime, timedelta, timezone
+from io import StringIO
 from functools import wraps
 
 
@@ -24,6 +25,7 @@ def main(args=sys.argv[1:]):
 
     try:
         main_logged(
+            opts.REVISION,
             opts.RELEASE_VERSION,
             opts.RELEASE_PREV,
             opts.RELEASE_FROM,
@@ -53,9 +55,14 @@ def parse_args(args):
         help='Use if this is a hotfix release from a non-master branch.',
     )
     p.add_argument(
+        'REVISION',
+        type=GitHash.parse_arg,
+        help='The git commit hash from which to construct the release.',
+    )
+    p.add_argument(
         'RELEASE_VERSION',
         type=Version.parse_arg,
-        help='The release version: vX.Y.Z-N',
+        help='The release version: vX.Y.Z',
     )
     p.add_argument(
         'RELEASE_PREV',
@@ -70,16 +77,22 @@ def parse_args(args):
     p.add_argument(
         'RELEASE_HEIGHT',
         type=int,
-        help='A block height approximately occuring on release day.',
+        help='A block height approximately occurring on release day.',
     )
     return p.parse_args(args)
 
 
 # Top-level flow:
-def main_logged(release, releaseprev, releasefrom, releaseheight, hotfix):
-    verify_tags(releaseprev, releasefrom)
+def main_logged(revision, release, releaseprev, releasefrom, releaseheight, hotfix):
+    verify_dependencies([
+        ('help2man', None),
+        ('debchange', 'devscripts'),
+    ])
+
+    verify_tags(revision, releaseprev, releasefrom)
     verify_version(release, releaseprev, hotfix)
-    initialize_git(release, hotfix)
+    initialize_git(revision, release, hotfix)
+    verify_dependency_updates()
     patch_version_in_files(release, releaseprev)
     patch_release_height(releaseheight)
     commit('Versioning changes for {}.'.format(release.novtext))
@@ -96,6 +109,9 @@ def main_logged(release, releaseprev, releasefrom, releaseheight, hotfix):
         ),
     )
 
+    update_book(release, releaseheight)
+    commit('Updated book for {}.'.format(release.novtext))
+
 
 def phase(message):
     def deco(f):
@@ -107,8 +123,28 @@ def phase(message):
     return deco
 
 
+@phase('Checking release script dependencies.')
+def verify_dependencies(dependencies):
+    for (dependency, pkg) in dependencies:
+        try:
+            sh_log(dependency, '--version')
+        except OSError:
+            raise SystemExit(
+                "Missing dependency {}{}".format(
+                    dependency,
+                    " (part of {} Debian package)".format(pkg) if pkg else "",
+                ),
+            )
+
+@phase('Checking dependency updates.')
+def verify_dependency_updates():
+    try:
+        sh_log('./qa/zcash/updatecheck.py')
+    except SystemExit:
+        raise SystemExit("Dependency update check failed. Either some updates have not been correctly postponed, or the .updatecheck-token file is missing.")
+
 @phase('Checking tags.')
-def verify_tags(releaseprev, releasefrom):
+def verify_tags(revision, releaseprev, releasefrom):
     candidates = []
 
     # Any tag beginning with a 'v' followed by [1-9] must be a version
@@ -117,20 +153,28 @@ def verify_tags(releaseprev, releasefrom):
     # ignored. Any other tag is silently ignored.
     candidatergx = re.compile('^v[1-9].*$')
 
-    for tag in sh_out('git', 'tag', '--list').splitlines():
+    for tag in sh_out('git', 'tag', '--list', '--merged', revision.value).splitlines():
         if candidatergx.match(tag):
-            candidates.append(Version.parse_arg(tag))
+            v = Version.parse(tag)
+            if v is not None:
+                candidates.append(v)
 
     candidates.sort()
     try:
         latest = candidates[-1]
     except IndexError:
-        raise SystemExit('No previous releases found by `git tag --list`.')
+        raise SystemExit(
+            'No previous releases found by `git tag --list --merged {}`.'
+            .format(
+                revision.value
+            ),
+        )
 
     if releaseprev != latest:
         raise SystemExit(
-            'The latest candidate in `git tag --list` is {} not {}'
+            'The latest candidate in `git tag --list --merged {} is {} not {}'
             .format(
+                revision.value,
                 latest.vtext,
                 releaseprev.vtext,
             ),
@@ -145,9 +189,10 @@ def verify_tags(releaseprev, releasefrom):
             prev_tags.append(candidate)
     else:
         raise SystemExit(
-            '{} does not appear in `git tag --list`'
+            '{} does not appear in `git tag --list --merged {}`'
             .format(
                 releasefrom.vtext,
+                revision.value,
             ),
         )
 
@@ -170,9 +215,9 @@ def verify_version(release, releaseprev, hotfix):
     expected = Version(
         releaseprev.major,
         releaseprev.minor,
-        releaseprev.patch,
+        releaseprev.patch + 1,
         releaseprev.betarc,
-        releaseprev.hotfix + 1 if releaseprev.hotfix else 1,
+        None
     )
     if release != expected:
         raise SystemExit(
@@ -183,29 +228,20 @@ def verify_version(release, releaseprev, hotfix):
 
 
 @phase('Initializing git.')
-def initialize_git(release, hotfix):
+def initialize_git(revision, release, hotfix):
     junk = sh_out('git', 'status', '--porcelain')
     if junk.strip():
         raise SystemExit('There are uncommitted changes:\n' + junk)
 
-    branch = sh_out('git', 'rev-parse', '--abbrev-ref', 'HEAD').strip()
-    if hotfix:
-        expected = 'hotfix-' + release.vtext
-    else:
-        expected = 'master'
-    if branch != expected:
-        raise SystemExit(
-            "Expected branch {!r}, found branch {!r}".format(
-                expected, branch,
-            ),
-        )
-
-    logging.info('Pulling to latest master.')
-    sh_log('git', 'pull', '--ff-only')
-
     branch = 'release-' + release.vtext
-    logging.info('Creating release branch: %r', branch)
-    sh_log('git', 'checkout', '-b', branch)
+    logging.info(
+        'Creating release branch {} from revision {}.'
+        .format(
+            branch,
+            revision.value
+        )
+    )
+    sh_log('git', 'checkout', '-b', branch, revision.value)
     return branch
 
 
@@ -214,7 +250,8 @@ def patch_version_in_files(release, releaseprev):
     patch_README(release, releaseprev)
     patch_clientversion_h(release)
     patch_configure_ac(release)
-    patch_gitian_linux_yml(release, releaseprev)
+    patch_gitian_linux_yml(release, releaseprev, 'contrib/gitian-descriptors/gitian-linux.yml')
+    patch_gitian_linux_yml(release, releaseprev, 'contrib/gitian-descriptors/gitian-linux-parallel.yml')
 
 
 @phase('Patching release height for end-of-support halt.')
@@ -248,10 +285,9 @@ def build():
         'Staging boost...',
         'Staging libevent...',
         'Staging zeromq...',
-        'Staging libgmp...',
         'Staging libsodium...',
         "Leaving directory '%s'" % depends_dir,
-        'config.status: creating libzcashconsensus.pc',
+        'config.status: creating libzcash_script.pc',
         "Entering directory '%s'" % src_dir,
         'httpserver.cpp',
         'torcontrol.cpp',
@@ -271,7 +307,6 @@ def gen_manpages():
 @phase('Generating release notes.')
 def gen_release_notes(release, releasefrom):
     release_notes = [
-        'python',
         './zcutil/release-notes.py',
         '--version',
         release.novtext,
@@ -291,8 +326,8 @@ def gen_release_notes(release, releasefrom):
 
 @phase('Updating debian changelog.')
 def update_debian_changelog(release):
-    os.environ['DEBEMAIL'] = 'team@z.cash'
-    os.environ['DEBFULLNAME'] = 'Zcash Company'
+    os.environ['DEBEMAIL'] = 'sysadmin@zodl.com'
+    os.environ['DEBFULLNAME'] = 'Zcash Open Development Lab'
     sh_log(
         'debchange',
         '--newversion', release.debversion,
@@ -300,6 +335,11 @@ def update_debian_changelog(release):
         '--changelog', './contrib/debian/changelog',
         '{} release.'.format(release.novtext),
     )
+
+
+@phase('Updating book.')
+def update_book(release, releaseheight):
+    patch_book_release_support(release, releaseheight)
 
 
 # Helper code:
@@ -344,8 +384,7 @@ def patch_configure_ac(release):
     )
 
 
-def patch_gitian_linux_yml(release, releaseprev):
-    path = 'contrib/gitian-descriptors/gitian-linux.yml'
+def patch_gitian_linux_yml(release, releaseprev, path):
     with PathPatcher(path) as (inf, outf):
         outf.write(inf.readline())
 
@@ -355,6 +394,60 @@ def patch_gitian_linux_yml(release, releaseprev):
         ), repr(secondline)
 
         outf.write('name: "zcash-{}"\n'.format(release.novtext))
+        outf.write(inf.read())
+
+
+def patch_book_release_support(release, releaseheight):
+    with PathPatcher('doc/book/src/user/release-support.md') as (inf, outf):
+        # Find the start marker.
+        cur_line = inf.readline()
+        while not 'RELEASE_SCRIPT_START_MARKER' in cur_line:
+            outf.write(cur_line)
+            cur_line = inf.readline()
+        outf.write(cur_line)
+
+        # The next two lines are the table heading.
+        for _ in range(2):
+            outf.write(inf.readline())
+
+        # The remaining lines before the end marker are table rows.
+        table_rows = []
+        cur_line = inf.readline()
+        while not 'RELEASE_SCRIPT_END_MARKER' in cur_line:
+            [row_ver, row_released, row_halt, row_eos] = cur_line.strip('| \n').split(' | ')
+            row_released = date.fromisoformat(row_released)
+            row_eos = date.fromisoformat(row_eos)
+            table_rows.append((row_ver, row_released, int(row_halt), row_eos))
+            cur_line = inf.readline()
+
+        # Prune rows for releases that have reached EoS.
+        today = datetime.now(timezone.utc).date()
+        table_rows = [row for row in table_rows if row[3] >= today]
+
+        # Add a row for this release.
+        with open('src/deprecation.h', 'r', encoding='utf8') as f:
+            weeks_prefix = 'RELEASE_TO_DEPRECATION_WEEKS = '
+            halt_prefix = 'DEPRECATION_HEIGHT = '
+            for line in f:
+                if weeks_prefix in line:
+                    weeks_to_eos = int(line.split(weeks_prefix)[1].split(';')[0])
+                if halt_prefix in line:
+                    val = line.split(halt_prefix)[1].split(';')[0]
+                    if val == 'APPROX_RELEASE_HEIGHT + ACTIVATION_TO_DEPRECATION_BLOCKS':
+                        halt_height = None
+                    else:
+                        halt_height = int(val)
+        if halt_height is None:
+            halt_height = releaseheight + (weeks_to_eos * 7 * 24 * 48)
+        eos_date = today + timedelta(weeks=weeks_to_eos)
+        table_rows.append((release.novtext, today, halt_height, eos_date))
+
+        # Write out the updated table rows.
+        for row in table_rows:
+            outf.write('| %s | %s | %s | %s |\n' % row)
+
+        # Write out the end marker and the rest of the page.
+        outf.write(cur_line)
         outf.write(inf.read())
 
 
@@ -403,7 +496,7 @@ def initialize_logging():
 
 def sh_out(*args):
     logging.debug('Run (out): %r', args)
-    return subprocess.check_output(args)
+    return subprocess.check_output(args).decode()
 
 
 def sh_log(*args):
@@ -417,7 +510,7 @@ def sh_log(*args):
 
     logging.debug('Run (log PID %r): %r', p.pid, args)
     for line in p.stdout:
-        logging.debug('> %s', line.rstrip())
+        logging.debug('> %s', line.decode().rstrip())
     status = p.wait()
     if status != 0:
         raise SystemExit('Nonzero exit status: {!r}'.format(status))
@@ -443,6 +536,7 @@ def sh_progress(markers, *args):
     pbar.update(marker)
     logging.debug('Run (log PID %r): %r', p.pid, args)
     for line in p.stdout:
+        line = line.decode()
         logging.debug('> %s', line.rstrip())
         for idx, val in enumerate(markers[marker:]):
             if val in line:
@@ -454,6 +548,30 @@ def sh_progress(markers, *args):
     if status != 0:
         raise SystemExit('Nonzero exit status: {!r}'.format(status))
 
+class GitHash (object):
+    '''A git commit hash.'''
+    RGX = re.compile(
+        r'^([0-9a-f]{10,40})$',
+    )
+
+    @staticmethod
+    def parse_arg(text):
+        m = GitHash.RGX.match(text)
+        if m is None:
+            raise argparse.ArgumentTypeError(
+                'Could not parse revision {!r} against regex {}'.format(
+                    text,
+                    GitHash.RGX.pattern,
+                ),
+            )
+        else:
+            assert len(m.groups()) == 1
+            [value] = m.groups()
+            return GitHash(value)
+
+    def __init__(self, value):
+        assert GitHash.RGX.match(value) is not None
+        self.value = value
 
 class Version (object):
     '''A release version.'''
@@ -463,9 +581,24 @@ class Version (object):
     )
 
     @staticmethod
-    def parse_arg(text):
+    def parse(text):
         m = Version.RGX.match(text)
         if m is None:
+            return None
+        else:
+            [major, minor, patch, _, betarc, hyphen] = m.groups()
+            return Version(
+                int(major),
+                int(minor),
+                int(patch),
+                betarc,
+                int(hyphen) if hyphen is not None else None,
+            )
+
+    @staticmethod
+    def parse_arg(text):
+        v = Version.parse(text)
+        if v is None:
             raise argparse.ArgumentTypeError(
                 'Could not parse version {!r} against regex {}'.format(
                     text,
@@ -473,39 +606,32 @@ class Version (object):
                 ),
             )
         else:
-            [major, minor, patch, _, betarc, hotfix] = m.groups()
-            return Version(
-                int(major),
-                int(minor),
-                int(patch),
-                betarc,
-                int(hotfix) if hotfix is not None else None,
-            )
+            return v
 
-    def __init__(self, major, minor, patch, betarc, hotfix):
+    def __init__(self, major, minor, patch, betarc, hyphen):
         for i in [major, minor, patch]:
             assert type(i) is int, i
         assert betarc in {None, 'rc', 'beta'}, betarc
-        assert hotfix is None or type(hotfix) is int, hotfix
+        assert hyphen is None or type(hyphen) is int, hyphen
         if betarc is not None:
-            assert hotfix is not None, (betarc, hotfix)
+            assert hyphen is not None, (betarc, hyphen)
 
         self.major = major
         self.minor = minor
         self.patch = patch
         self.betarc = betarc
-        self.hotfix = hotfix
+        self.hyphen = hyphen
 
-        if hotfix is None:
+        if hyphen is None:
             self.build = 50
         else:
-            assert hotfix > 0, hotfix
+            assert hyphen > 0, hyphen
             if betarc is None:
-                assert hotfix < 50, hotfix
-                self.build = 50 + hotfix
+                assert hyphen < 50, hyphen
+                self.build = 50 + hyphen
             else:
-                assert hotfix < 26, hotfix
-                self.build = {'beta': 0, 'rc': 25}[betarc] + hotfix - 1
+                assert hyphen < 26, hyphen
+                self.build = {'beta': 0, 'rc': 25}[betarc] + hyphen - 1
 
     @property
     def novtext(self):
@@ -522,29 +648,29 @@ class Version (object):
     def _novtext(self, debian):
         novtext = '{}.{}.{}'.format(self.major, self.minor, self.patch)
 
-        if self.hotfix is None:
+        if self.hyphen is None:
             return novtext
         else:
-            assert self.hotfix > 0, self.hotfix
+            assert self.hyphen > 0, self.hyphen
             if self.betarc is None:
-                assert self.hotfix < 50, self.hotfix
+                assert self.hyphen < 50, self.hyphen
                 sep = '+' if debian else '-'
-                return '{}{}{}'.format(novtext, sep, self.hotfix)
+                return '{}{}{}'.format(novtext, sep, self.hyphen)
             else:
-                assert self.hotfix < 26, self.hotfix
+                assert self.hyphen < 26, self.hyphen
                 sep = '~' if debian else '-'
                 return '{}{}{}{}'.format(
                     novtext,
                     sep,
                     self.betarc,
-                    self.hotfix,
+                    self.hyphen,
                 )
 
     def __repr__(self):
         return '<Version {}>'.format(self.vtext)
 
     def _sort_tup(self):
-        if self.hotfix is None:
+        if self.hyphen is None:
             prio = 2
         else:
             prio = {'beta': 0, 'rc': 1, None: 3}[self.betarc]
@@ -554,11 +680,14 @@ class Version (object):
             self.minor,
             self.patch,
             prio,
-            self.hotfix,
+            self.hyphen,
         )
 
-    def __cmp__(self, other):
-        return cmp(self._sort_tup(), other._sort_tup())
+    def __lt__(self, other):
+        return self._sort_tup() < other._sort_tup()
+
+    def __eq__(self, other):
+        return self._sort_tup() == other._sort_tup()
 
 
 class PathPatcher (object):
@@ -567,14 +696,14 @@ class PathPatcher (object):
 
     def __enter__(self):
         logging.debug('Patching %r', self._path)
-        self._inf = file(self._path, 'r')
+        self._inf = open(self._path, 'r', encoding='utf8')
         self._outf = StringIO()
         return (self._inf, self._outf)
 
     def __exit__(self, et, ev, tb):
         if (et, ev, tb) == (None, None, None):
             self._inf.close()
-            with file(self._path, 'w') as f:
+            with open(self._path, 'w', encoding='utf8') as f:
                 f.write(self._outf.getvalue())
 
 
@@ -614,11 +743,17 @@ class TestVersion (unittest.TestCase):
             v = Version.parse_arg(case)
             self.assertEqual(v.vtext, case)
 
+    def test_rev_parse(self):
+        sample = '958bcf2dac6d81d17797c0f58f176262a496cfd4'
+        rev = GitHash.parse_arg(sample)
+        self.assertEqual(rev.value, sample)
+
     def test_arg_parse_negatives(self):
         cases = [
             'v07.0.0',
             'v1.0.03',
-            'v1.2.3-0',  # Hotfix numbers must begin w/ 1
+            'v1.2.3-0',
+            'v1.2.3-foobar',
             'v1.2.3~0',
             'v1.2.3+0',
             '1.2.3',
@@ -656,13 +791,13 @@ if __name__ == '__main__':
         actualargs = sys.argv
         sys.argv = [sys.argv[0], '--verbose']
 
-        print '=== Self Test ==='
+        print('=== Self Test ===')
         try:
-            unittest.main()
+            unittest.main(verbosity=2)
         except SystemExit as e:
             if e.args[0] != 0:
                 raise
 
         sys.argv = actualargs
-        print '=== Running ==='
+        print('=== Running ===')
         main()

@@ -1,14 +1,16 @@
 // Copyright (c) 2015 The Bitcoin Core developers
+// Copyright (c) 2017-2023 The Zcash developers
 // Distributed under the MIT software license, see the accompanying
-// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+// file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 #include "scheduler.h"
 
 #include "reverselock.h"
 
 #include <assert.h>
-#include <boost/bind.hpp>
 #include <utility>
+
+#include <boost/bind/bind.hpp>
 
 CScheduler::CScheduler() : nThreadsServicingQueue(0), stopRequested(false), stopWhenEmpty(false)
 {
@@ -40,9 +42,12 @@ void CScheduler::serviceQueue()
 
             // Some boost versions have a conflicting overload of wait_until that returns void.
             // Explicitly use a template here to avoid hitting that overload.
-            while (!shouldStop() && !taskQueue.empty() &&
-                   newTaskScheduled.wait_until<>(lock, taskQueue.begin()->first) != boost::cv_status::timeout) {
-                // Keep waiting until timeout
+            while (!shouldStop() && !taskQueue.empty())
+            {
+                auto copy = taskQueue.begin()->first;
+                if (newTaskScheduled.wait_until<>(lock, copy) == boost::cv_status::timeout) {
+                    break;
+                }
             }
 
             // If there are multiple threads, the queue can empty while we're waiting (another
@@ -65,6 +70,7 @@ void CScheduler::serviceQueue()
         }
     }
     --nThreadsServicingQueue;
+    newTaskScheduled.notify_one();
 }
 
 void CScheduler::stop(bool drain)

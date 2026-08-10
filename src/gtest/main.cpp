@@ -1,60 +1,94 @@
 #include "gmock/gmock.h"
-#include "crypto/common.h"
+#include "init.h"
 #include "key.h"
 #include "pubkey.h"
-#include "zcash/JoinSplit.hpp"
-#include "util.h"
-
-#include <libsnark/common/default_types/r1cs_ppzksnark_pp.hpp>
-#include <libsnark/zk_proof_systems/ppzksnark/r1cs_ppzksnark/r1cs_ppzksnark.hpp>
+#include "random.h"
+#include "script/sigcache.h"
+#include "util/system.h"
+#include "util/test.h"
 
 #include "librustzcash.h"
+#include <sodium.h>
+#include <tracing.h>
 
-struct ECCryptoClosure
-{
-    ECCVerifyHandle handle;
+#include <rust/bridge.h>
+
+#include <boost/filesystem.hpp>
+
+const std::function<std::string(const char*)> G_TRANSLATION_FUN = nullptr;
+
+uint256 insecure_rand_seed = GetRandHash();
+FastRandomContext insecure_rand_ctx(insecure_rand_seed);
+
+class LogGrabber : public ::testing::EmptyTestEventListener {
+    fs::path logPath;
+
+public:
+    LogGrabber(fs::path logPathIn) : logPath(logPathIn) {}
+
+    virtual void OnTestStart(const ::testing::TestInfo& test_info) {
+        // Test logs are written synchronously, so we can clear the log file to
+        // ensure that at the end of the test, the log lines are all related to
+        // the test itself.
+        std::ofstream logFile;
+        logFile.open(logPath.string(), std::ofstream::out | std::ofstream::trunc);
+        logFile.close();
+    }
+
+    virtual void OnTestEnd(const ::testing::TestInfo& test_info) {
+        // If the test failed, print the test logs.
+        auto result = test_info.result();
+        if (result && result->Failed()) {
+            std::cout << "\n--- Logs:";
+
+            std::ifstream logFile;
+            logFile.open(logPath.string(), std::ios::in | std::ios::ate);
+            ASSERT_TRUE(logFile.is_open());
+            logFile.seekg(0, logFile.beg);
+            std::string line;
+            while (logFile.good()) {
+                std::getline(logFile, line);
+                if (!line.empty()) {
+                    std::cout << "\n  " << line;
+                }
+            }
+
+            std::cout << "\n---" << std::endl;
+        }
+    }
 };
 
-ECCryptoClosure instance_of_eccryptoclosure;
-
-ZCJoinSplit* params;
-
 int main(int argc, char **argv) {
-  assert(init_and_check_sodium() != -1);
+  assert(sodium_init() != -1);
   ECC_Start();
+    InitSignatureCache(DEFAULT_MAX_SIG_CACHE_SIZE * ((size_t) 1 << 20));
+    bundlecache::init(DEFAULT_MAX_SIG_CACHE_SIZE * ((size_t) 1 << 20));
 
-  libsnark::default_r1cs_ppzksnark_pp::init_public_params();
-  libsnark::inhibit_profiling_info = true;
-  libsnark::inhibit_profiling_counters = true;
-  boost::filesystem::path pk_path = ZC_GetParamsDir() / "sprout-proving.key";
-  boost::filesystem::path vk_path = ZC_GetParamsDir() / "sprout-verifying.key";
-  params = ZCJoinSplit::Prepared(vk_path.string(), pk_path.string());
+    // Log all errors to a common test file.
+    fs::path tmpPath = fs::temp_directory_path();
+    fs::path tmpFilename = fs::unique_path("%%%%%%%%");
+    fs::path logPath = tmpPath / tmpFilename;
+    const fs::path::string_type& logPathStr = logPath.native();
+    static_assert(sizeof(fs::path::value_type) == sizeof(codeunit),
+                    "native path has unexpected code unit size");
+    const codeunit* logPathCStr = reinterpret_cast<const codeunit*>(logPathStr.c_str());
+    size_t logPathLen = logPathStr.length();
 
-  boost::filesystem::path sapling_spend = ZC_GetParamsDir() / "sapling-spend.params";
-  boost::filesystem::path sapling_output = ZC_GetParamsDir() / "sapling-output.params";
-  boost::filesystem::path sprout_groth16 = ZC_GetParamsDir() / "sprout-groth16.params";
-
-    static_assert(
-        sizeof(boost::filesystem::path::value_type) == sizeof(codeunit),
-        "librustzcash not configured correctly");
-    auto sapling_spend_str = sapling_spend.native();
-    auto sapling_output_str = sapling_output.native();
-    auto sprout_groth16_str = sprout_groth16.native();
-
-    librustzcash_init_zksnark_params(
-        reinterpret_cast<const codeunit*>(sapling_spend_str.c_str()),
-        sapling_spend_str.length(),
-        "8270785a1a0d0bc77196f000ee6d221c9c9894f55307bd9357c3f0105d31ca63991ab91324160d8f53e2bbd3c2633a6eb8bdf5205d822e7f3f73edac51b2b70c",
-        reinterpret_cast<const codeunit*>(sapling_output_str.c_str()),
-        sapling_output_str.length(),
-        "657e3d38dbb5cb5e7dd2970e8b03d69b4787dd907285b5a7f0790dcc8072f60bf593b32cc2d1c030e00ff5ae64bf84c5c3beb84ddc841d48264b4a171744d028",
-        reinterpret_cast<const codeunit*>(sprout_groth16_str.c_str()),
-        sprout_groth16_str.length(),
-        "e9b238411bd6c0ec4791e9d04245ec350c9c5744f5610dfcce4365d5ca49dfefd5054e371842b3f88fa1b9d7e8e075249b3ebabd167fa8b0f3161292d36c180a"
-    );
+    std::string initialFilter = "error";
+    pTracingHandle = tracing_init_test(
+        logPathCStr, logPathLen,
+        initialFilter.c_str());
 
   testing::InitGoogleMock(&argc, argv);
-  
+
+  // The "threadsafe" style is necessary for correct operation of death/exit
+  // tests on macOS (https://github.com/zcash/zcash/issues/4802).
+  testing::FLAGS_gtest_death_test_style = "threadsafe";
+
+    ::testing::TestEventListeners& listeners =
+        ::testing::UnitTest::GetInstance()->listeners();
+    listeners.Append(new LogGrabber(logPath));
+
   auto ret = RUN_ALL_TESTS();
 
   ECC_Stop();

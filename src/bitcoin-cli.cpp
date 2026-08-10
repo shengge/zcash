@@ -1,16 +1,18 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2013 The Bitcoin Core developers
+// Copyright (c) 2016-2023 The Zcash developers
 // Distributed under the MIT software license, see the accompanying
-// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+// file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 #include "chainparamsbase.h"
 #include "clientversion.h"
+#include "fs.h"
 #include "rpc/client.h"
 #include "rpc/protocol.h"
-#include "util.h"
-#include "utilstrencodings.h"
+#include "util/match.h"
+#include "util/system.h"
+#include "util/strencodings.h"
 
-#include <boost/filesystem/operations.hpp>
 #include <stdio.h>
 
 #include <event2/buffer.h>
@@ -19,6 +21,17 @@
 
 #include <univalue.h>
 
+#ifdef WIN32
+#include <windows.h>
+#else
+#include <termios.h>
+#include <unistd.h>
+#include <cerrno>
+#endif
+
+const std::function<std::string(const char*)> G_TRANSLATION_FUN = nullptr;
+
+static const char DEFAULT_RPCCONNECT[] = "127.0.0.1";
 static const int DEFAULT_HTTP_CLIENT_TIMEOUT=900;
 static const int CONTINUE_EXECUTION=-1;
 
@@ -27,18 +40,16 @@ std::string HelpMessageCli()
     std::string strUsage;
     strUsage += HelpMessageGroup(_("Options:"));
     strUsage += HelpMessageOpt("-?", _("This help message"));
-    strUsage += HelpMessageOpt("-conf=<file>", strprintf(_("Specify configuration file (default: %s)"), "zcash.conf"));
-    strUsage += HelpMessageOpt("-datadir=<dir>", _("Specify data directory"));
-    strUsage += HelpMessageOpt("-testnet", _("Use the test network"));
-    strUsage += HelpMessageOpt("-regtest", _("Enter regression test mode, which uses a special chain in which blocks can be "
-                                             "solved instantly. This is intended for regression testing tools and app development."));
-    strUsage += HelpMessageOpt("-rpcconnect=<ip>", strprintf(_("Send commands to node running on <ip> (default: %s)"), "127.0.0.1"));
+    strUsage += HelpMessageOpt("-conf=<file>", strprintf(_("Specify configuration file. Relative paths will be prefixed by datadir location. (default: %s)"), BITCOIN_CONF_FILENAME));
+    strUsage += HelpMessageOpt("-datadir=<dir>", _("Specify data directory (this path cannot use '~')"));
+    strUsage += HelpMessageOpt("-stdin", _("Read extra arguments from standard input, one per line until EOF/Ctrl-D (recommended for sensitive information such as passphrases). If first extra argument is `walletpassphrase` then the first line(password) will not be echoed."));
+    AppendParamsHelpMessages(strUsage);
+    strUsage += HelpMessageOpt("-rpcconnect=<ip>", strprintf(_("Send commands to node running on <ip> (default: %s)"), DEFAULT_RPCCONNECT));
     strUsage += HelpMessageOpt("-rpcport=<port>", strprintf(_("Connect to JSON-RPC on <port> (default: %u or testnet: %u)"), 8232, 18232));
     strUsage += HelpMessageOpt("-rpcwait", _("Wait for RPC server to start"));
     strUsage += HelpMessageOpt("-rpcuser=<user>", _("Username for JSON-RPC connections"));
     strUsage += HelpMessageOpt("-rpcpassword=<pw>", _("Password for JSON-RPC connections"));
     strUsage += HelpMessageOpt("-rpcclienttimeout=<n>", strprintf(_("Timeout in seconds during HTTP requests, or 0 for no timeout. (default: %d)"), DEFAULT_HTTP_CLIENT_TIMEOUT));
-    strUsage += HelpMessageOpt("-stdin", _("Read extra arguments from standard input, one per line until EOF/Ctrl-D (recommended for sensitive information such as passphrases)"));
 
     return strUsage;
 }
@@ -96,19 +107,21 @@ static int AppInitRPC(int argc, char* argv[])
         }
         return EXIT_SUCCESS;
     }
-    if (!boost::filesystem::is_directory(GetDataDir(false))) {
+    if (!fs::is_directory(GetDataDir(false))) {
         fprintf(stderr, "Error: Specified data directory \"%s\" does not exist.\n", mapArgs["-datadir"].c_str());
         return EXIT_FAILURE;
     }
     try {
-        ReadConfigFile(mapArgs, mapMultiArgs);
+        ReadConfigFile(GetArg("-conf", BITCOIN_CONF_FILENAME), mapArgs, mapMultiArgs);
     } catch (const std::exception& e) {
         fprintf(stderr,"Error reading configuration file: %s\n", e.what());
         return EXIT_FAILURE;
     }
     // Check for -testnet or -regtest parameter (BaseParams() calls are only valid after this clause)
-    if (!SelectBaseParamsFromCommandLine()) {
-        fprintf(stderr, "Error: Invalid combination of -regtest and -testnet.\n");
+    try {
+        SelectBaseParams(ChainNameFromCommandLine());
+    } catch(std::exception &e) {
+        fprintf(stderr, "Error: %s\n", e.what());
         return EXIT_FAILURE;
     }
     if (GetBoolArg("-rpcssl", false))
@@ -185,9 +198,35 @@ static void http_error_cb(enum evhttp_request_error err, void *ctx)
 }
 #endif
 
-UniValue CallRPC(const std::string& strMethod, const UniValue& params)
+tl::expected<UniValue, UniValue> CallRPC(const std::string& strMethod, const UniValue& params);
+
+UniValue ConvertValues(const std::string &strMethod, const std::vector<std::string> &strParams)
 {
-    std::string host = GetArg("-rpcconnect", "127.0.0.1");
+    return RPCConvertValues(strMethod, strParams)
+        .map_error([&](auto failure) {
+            throw std::runtime_error(
+                    FormatConversionFailure(strMethod, failure)
+                    + examine(failure, match {
+                        [](const UnknownRPCMethod&) { return std::string{}; },
+                        [&](const auto&) {
+                            auto helpMsg = CallRPC("help", ConvertValues("help", {strMethod}));
+                            return "\n\n"
+                                + (helpMsg.has_value()
+                                   ? "Usage: " + helpMsg.value().get_str()
+                                   : strprintf(
+                                           "An error occurred while attempting to retrieve the "
+                                           "help text for %s: %s",
+                                           strMethod,
+                                           helpMsg.error().get_str()));
+                        }
+                    }));
+        })
+        .value();
+}
+
+tl::expected<UniValue, UniValue> CallRPC(const std::string& strMethod, const UniValue& params)
+{
+    std::string host = GetArg("-rpcconnect", DEFAULT_RPCCONNECT);
     int port = GetArg("-rpcport", BaseParams().RPCPort());
 
     // Obtain event base
@@ -213,7 +252,7 @@ UniValue CallRPC(const std::string& strMethod, const UniValue& params)
             throw std::runtime_error(strprintf(
                 _("Could not locate RPC credentials. No authentication cookie could be found,\n"
                   "and no rpcpassword is set in the configuration file (%s)."),
-                    GetConfigFile().string().c_str()));
+                    GetConfigFile(GetArg("-conf", BITCOIN_CONF_FILENAME)).string().c_str()));
 
         }
     } else {
@@ -257,7 +296,46 @@ UniValue CallRPC(const std::string& strMethod, const UniValue& params)
     if (reply.empty())
         throw std::runtime_error("expected reply to have result, error and id properties");
 
-    return reply;
+    const UniValue error = find_value(reply, "error");
+
+    return error.isNull()
+        ? tl::expected<UniValue, UniValue>(find_value(reply, "result"))
+        : tl::make_unexpected(error);
+}
+
+bool SetStdinEcho(bool enable = true)
+{
+#ifdef WIN32
+    HANDLE hStdin = GetStdHandle(STD_INPUT_HANDLE);
+    if (hStdin == INVALID_HANDLE_VALUE || hStdin == NULL) return false;
+    DWORD mode;
+    // if it's not a terminal then stdin won't be echoed, so that's not an error
+    DWORD dwStdinType = GetFileType(hStdin) & ~FILE_TYPE_REMOTE;
+    bool could_be_terminal = dwStdinType == FILE_TYPE_CHAR ||
+                            (dwStdinType == FILE_TYPE_UNKNOWN && GetLastError() == NO_ERROR);
+    if (!could_be_terminal || GetConsoleMode(hStdin, &mode) == 0) return true;
+
+    if (!enable)
+        mode &= ~ENABLE_ECHO_INPUT;
+    else
+        mode |= ENABLE_ECHO_INPUT;
+
+    if (SetConsoleMode(hStdin, mode) == 0) return false;
+
+#else
+    struct termios tty;
+    if (tcgetattr(STDIN_FILENO, &tty) != 0) {
+        // if it's not a terminal then stdin won't be echoed, so that's not an error
+        return errno == ENOTTY;
+    }
+    if (!enable)
+        tty.c_lflag &= ~ECHO;
+    else
+        tty.c_lflag |= ECHO;
+
+    if (tcsetattr(STDIN_FILENO, TCSANOW, &tty) != 0) return false;
+#endif
+    return true;
 }
 
 int CommandLineRPC(int argc, char *argv[])
@@ -272,27 +350,38 @@ int CommandLineRPC(int argc, char *argv[])
         }
         std::vector<std::string> args = std::vector<std::string>(&argv[1], &argv[argc]);
         if (GetBoolArg("-stdin", false)) {
+            bool hide = false;
+            if (args.size() > 0 && args[0] == "walletpassphrase") {
+                if (!SetStdinEcho(false))
+                    throw std::runtime_error("unable to set terminal to non-echoing");
+                hide = true;
+            }
+
             // Read one arg per line from stdin and append
             std::string line;
-            while (std::getline(std::cin,line))
+            while (std::getline(std::cin,line)) {
                 args.push_back(line);
+                if (hide) {
+                    if (!SetStdinEcho(true))
+                        throw std::runtime_error("unable to set terminal back to echoing");
+                    hide = false;
+                }
+            }
         }
         if (args.size() < 1)
             throw std::runtime_error("too few parameters (need at least command)");
         std::string strMethod = args[0];
-        UniValue params = RPCConvertValues(strMethod, std::vector<std::string>(args.begin()+1, args.end()));
+        auto params =
+            ConvertValues(strMethod, std::vector<std::string>(args.begin()+1, args.end()));
 
         // Execute and handle connection failures with -rpcwait
         const bool fWait = GetBoolArg("-rpcwait", false);
         do {
             try {
-                const UniValue reply = CallRPC(strMethod, params);
+                auto reply = CallRPC(strMethod, params);
 
-                // Parse reply
-                const UniValue& result = find_value(reply, "result");
-                const UniValue& error  = find_value(reply, "error");
-
-                if (!error.isNull()) {
+                if (!reply.has_value()) {
+                    auto error = reply.error();
                     // Error
                     int code = error["code"].get_int();
                     if (fWait && code == RPC_IN_WARMUP)
@@ -309,6 +398,7 @@ int CommandLineRPC(int argc, char *argv[])
                             strPrint += "error message:\n"+errMsg.get_str();
                     }
                 } else {
+                    auto result = reply.value();
                     // Result
                     if (result.isNull())
                         strPrint = "";
@@ -327,9 +417,6 @@ int CommandLineRPC(int argc, char *argv[])
                     throw;
             }
         } while (fWait);
-    }
-    catch (const boost::thread_interrupted&) {
-        throw;
     }
     catch (const std::exception& e) {
         strPrint = std::string("error: ") + e.what();

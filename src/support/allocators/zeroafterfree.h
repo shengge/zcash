@@ -1,7 +1,8 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2013 The Bitcoin Core developers
+// Copyright (c) 2019-2023 The Zcash developers
 // Distributed under the MIT software license, see the accompanying
-// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+// file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 #ifndef BITCOIN_SUPPORT_ALLOCATORS_ZEROAFTERFREE_H
 #define BITCOIN_SUPPORT_ALLOCATORS_ZEROAFTERFREE_H
@@ -13,22 +14,20 @@
 
 template <typename T>
 struct zero_after_free_allocator : public std::allocator<T> {
-    // MSVC8 default copy constructor is broken
-    typedef std::allocator<T> base;
-    typedef typename base::size_type size_type;
-    typedef typename base::difference_type difference_type;
-    typedef typename base::pointer pointer;
-    typedef typename base::const_pointer const_pointer;
-    typedef typename base::reference reference;
-    typedef typename base::const_reference const_reference;
-    typedef typename base::value_type value_type;
-    zero_after_free_allocator() throw() {}
-    zero_after_free_allocator(const zero_after_free_allocator& a) throw() : base(a) {}
+    using base = std::allocator<T>;
+    using traits = std::allocator_traits<base>;
+    using size_type = typename traits::size_type;
+    using difference_type = typename traits::difference_type;
+    using pointer = typename traits::pointer;
+    using const_pointer = typename traits::const_pointer;
+    using value_type = typename traits::value_type;
+    zero_after_free_allocator() noexcept {}
+    zero_after_free_allocator(const zero_after_free_allocator& a) noexcept : base(a) {}
     template <typename U>
-    zero_after_free_allocator(const zero_after_free_allocator<U>& a) throw() : base(a)
+    zero_after_free_allocator(const zero_after_free_allocator<U>& a) noexcept : base(a)
     {
     }
-    ~zero_after_free_allocator() throw() {}
+    ~zero_after_free_allocator() noexcept {}
     template <typename _Other>
     struct rebind {
         typedef zero_after_free_allocator<_Other> other;

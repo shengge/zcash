@@ -1,6 +1,7 @@
 // Copyright (c) 2011-2013 The Bitcoin Core developers
+// Copyright (c) 2018-2023 The Zcash developers
 // Distributed under the MIT software license, see the accompanying
-// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+// file COPYING or https://www.opensource.org/licenses/mit-license.php .
 #include "arith_uint256.h"
 #include "uint256.h"
 #include "version.h"

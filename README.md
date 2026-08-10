@@ -1,62 +1,97 @@
-Zcash 2.0.2-rc1
+Zcash 6.20.0
 <img align="right" width="120" height="80" src="doc/imgs/logo.png">
 ===========
+
+> ## ⚠️ `zcashd` has reached its End of Life
+>
+> `zcashd` reached its final End-of-Support halt on July 18th 2026 at block
+> height 3417100, and every unmodified `zcashd` 6.20.0 node shut down at that
+> height.
+>
+> The `zcashd` node software is succeeded by the [Zebra](https://github.com/ZcashFoundation/zebra)
+> and [Zakura](https://zakura.com/) consensus node implementations, along with the
+> [Zallet](https://zcash.github.io/zallet/) full node wallet. Users of the `zcashd`
+> node and wallet implementation should migrate to these alternatives.
+>
+> See the [End of Life](https://zcash.github.io/zcash/user/end-of-life.html)
+> page for the full timeline of the zcashd wind-down and migration guidance.
 
 What is Zcash?
 --------------
 
-[Zcash](https://z.cash/) is an implementation of the "Zerocash" protocol.
-Based on Bitcoin's code, it intends to offer a far higher standard of privacy
-through a sophisticated zero-knowledge proving scheme that preserves
-confidentiality of transaction metadata. Technical details are available
-in our [Protocol Specification](https://github.com/zcash/zips/raw/master/protocol/protocol.pdf).
+[Zcash](https://z.cash/) is HTTPS for money.
 
-This software is the Zcash client. It downloads and stores the entire history
-of Zcash transactions; depending on the speed of your computer and network
-connection, the synchronization process could take a day or more once the
-blockchain has reached a significant size.
+Initially based on Bitcoin's design, Zcash has been developed from
+the Zerocash protocol to offer a far higher standard of privacy and
+anonymity. It uses a sophisticated zero-knowledge proving scheme to
+preserve confidentiality and hide the connections between shielded
+transactions. More technical details are available in our
+[Protocol Specification](https://zips.z.cash/protocol/protocol.pdf).
+
+## The `zcashd` Full Node
+
+This repository was the home of the original `zcashd` software, a Zcash
+consensus node implementation.
 
 <p align="center">
   <img src="doc/imgs/zcashd_screen.gif" height="500">
 </p>
+
+The `zcashd` code was derived from a source fork of
+[Bitcoin Core](https://github.com/bitcoin/bitcoin). The code was forked
+initially from Bitcoin Core v0.11.2, and the two codebases diverged
+substantially.
+
+
 
 #### :lock: Security Warnings
 
 See important security warnings on the
 [Security Information page](https://z.cash/support/security/).
 
-**Zcash is experimental and a work-in-progress.** Use at your own risk.
+**Zcash is experimental and a work in progress.** Use it at your own risk.
 
 ####  :ledger: Deprecation Policy
 
 This release is considered deprecated 16 weeks after the release day. There
 is an automatic deprecation shutdown feature which will halt the node some
-time after this 16 week time period. The automatic feature is based on block
+time after this 16-week period. The automatic feature is based on block
 height.
+
+## Other Zcash Implementations
+
+The [Zebra](https://github.com/ZcashFoundation/zebra) project offers a
+different Zcash consensus node implementation, written largely from the
+ground up.
 
 ## Getting Started
 
-Please see our [user guide](https://zcash.readthedocs.io/en/latest/rtd_pages/rtd_docs/user_guide.html) for joining the main Zcash network.
+Please see our [user
+guide](https://zcash.readthedocs.io/en/latest/rtd_pages/rtd_docs/user_guide.html)
+for instructions on joining the main Zcash network.
 
 ### Need Help?
 
-* :blue_book: See the documentation at the [ReadtheDocs](https://zcash.readthedocs.io)
+* :blue_book: See the documentation at the [ReadTheDocs](https://zcash.readthedocs.io)
   for help and more information.
-* :incoming_envelope: Ask for help on the [Zcash](https://forum.z.cash/) forum.
-* :mag: Chat with our support community on [Rocket.Chat](https://chat.zcashcommunity.com/channel/user-support)
+* :incoming_envelope: Ask for help on the [Zcash forum](https://forum.zcashcommunity.com/).
+* :speech_balloon: Join our community on the [Zcash Global Discord](https://discord.com/invite/zcash).
+* 🧑‍🎓: Learn at [ZecHub](https://zechub.wiki/)
 
 Participation in the Zcash project is subject to a
 [Code of Conduct](code_of_conduct.md).
 
 ### Building
 
-Build Zcash along with most dependencies from source by running:
+Build Zcash along with most dependencies from source by running the following command:
 
 ```
 ./zcutil/build.sh -j$(nproc)
 ```
 
-Currently only Linux is officially supported.
+Currently, Zcash is only officially supported on Debian and Ubuntu. See the
+[Debian / Ubuntu build page](https://zcash.readthedocs.io/en/latest/rtd_pages/Debian-Ubuntu-build.html)
+for detailed instructions.
 
 License
 -------

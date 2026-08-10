@@ -1,6 +1,7 @@
 // Copyright (c) 2012-2013 The Bitcoin Core developers
+// Copyright (c) 2018-2023 The Zcash developers
 // Distributed under the MIT software license, see the accompanying
-// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+// file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 #include "pubkey.h"
 #include "key.h"
@@ -11,7 +12,6 @@
 
 #include <vector>
 
-#include <boost/foreach.hpp>
 #include <boost/test/unit_test.hpp>
 
 using namespace std;
@@ -48,8 +48,7 @@ BOOST_AUTO_TEST_CASE(GetSigOpCount)
     std::vector<CPubKey> keys;
     for (int i = 0; i < 3; i++)
     {
-        CKey k;
-        k.MakeNewKey(true);
+        CKey k = CKey::TestOnlyRandomKey(true);
         keys.push_back(k.GetPubKey());
     }
     CScript s2 = GetScriptForMultisig(1, keys);

@@ -1,7 +1,8 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2014 The Bitcoin Core developers
+// Copyright (c) 2016-2023 The Zcash developers
 // Distributed under the MIT software license, see the accompanying
-// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+// file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 #include "interpreter.h"
 
@@ -13,6 +14,10 @@
 #include "pubkey.h"
 #include "script/script.h"
 #include "uint256.h"
+
+#include <librustzcash.h>
+#include <rust/constants.h>
+#include <rust/transaction.h>
 
 using namespace std;
 
@@ -65,17 +70,17 @@ static inline void popstack(vector<valtype>& stack)
 }
 
 bool static IsCompressedOrUncompressedPubKey(const valtype &vchPubKey) {
-    if (vchPubKey.size() < 33) {
+    if (vchPubKey.size() < CPubKey::COMPRESSED_PUBLIC_KEY_SIZE) {
         //  Non-canonical public key: too short
         return false;
     }
     if (vchPubKey[0] == 0x04) {
-        if (vchPubKey.size() != 65) {
+        if (vchPubKey.size() != CPubKey::PUBLIC_KEY_SIZE) {
             //  Non-canonical public key: invalid length for uncompressed key
             return false;
         }
     } else if (vchPubKey[0] == 0x02 || vchPubKey[0] == 0x03) {
-        if (vchPubKey.size() != 33) {
+        if (vchPubKey.size() != CPubKey::COMPRESSED_PUBLIC_KEY_SIZE) {
             //  Non-canonical public key: invalid length for compressed key
             return false;
         }
@@ -91,7 +96,7 @@ bool static IsCompressedOrUncompressedPubKey(const valtype &vchPubKey) {
  * Where R and S are not negative (their first byte has its highest bit not set), and not
  * excessively padded (do not start with a 0 byte, unless an otherwise negative number follows,
  * in which case a single 0 byte is necessary and even required).
- * 
+ *
  * See https://bitcointalk.org/index.php?topic=8392.msg127623#msg127623
  *
  * This function is consensus-critical since BIP66.
@@ -131,7 +136,7 @@ bool static IsValidSignatureEncoding(const std::vector<unsigned char> &sig) {
     // Verify that the length of the signature matches the sum of the length
     // of the elements.
     if ((size_t)(lenR + lenS + 7) != sig.size()) return false;
- 
+
     // Check whether the R element is an integer.
     if (sig[2] != 0x02) return false;
 
@@ -965,12 +970,12 @@ namespace {
  */
 class CTransactionSignatureSerializer {
 private:
-    const CTransaction &txTo;  //! reference to the spending transaction (the one being serialized)
-    const CScript &scriptCode; //! output script being consumed
-    const unsigned int nIn;    //! input index of txTo being signed
-    const bool fAnyoneCanPay;  //! whether the hashtype has the SIGHASH_ANYONECANPAY flag set
-    const bool fHashSingle;    //! whether the hashtype is SIGHASH_SINGLE
-    const bool fHashNone;      //! whether the hashtype is SIGHASH_NONE
+    const CTransaction& txTo;  //!< reference to the spending transaction (the one being serialized)
+    const CScript& scriptCode; //!< output script being consumed
+    const unsigned int nIn;    //!< input index of txTo being signed
+    const bool fAnyoneCanPay;  //!< whether the hashtype has the SIGHASH_ANYONECANPAY flag set
+    const bool fHashSingle;    //!< whether the hashtype is SIGHASH_SINGLE
+    const bool fHashNone;      //!< whether the hashtype is SIGHASH_NONE
 
 public:
     CTransactionSignatureSerializer(const CTransaction &txToIn, const CScript &scriptCodeIn, unsigned int nInIn, int nHashTypeIn) :
@@ -1038,7 +1043,7 @@ public:
         // Serialize nLockTime
         ::Serialize(s, txTo.nLockTime);
 
-        // Serialize vjoinsplit
+        // Serialize vJoinSplit
         if (txTo.nVersion >= 2) {
             //
             // SIGHASH_* functions will hash portions of
@@ -1046,8 +1051,8 @@ public:
             // keeps the JoinSplit cryptographically bound
             // to the transaction.
             //
-            ::Serialize(s, txTo.vjoinsplit);
-            if (txTo.vjoinsplit.size() > 0) {
+            ::Serialize(s, txTo.vJoinSplit);
+            if (txTo.vJoinSplit.size() > 0) {
                 ::Serialize(s, txTo.joinSplitPubKey);
 
                 CTransaction::joinsplit_sig_t nullSig = {};
@@ -1057,17 +1062,17 @@ public:
     }
 };
 
-const unsigned char ZCASH_PREVOUTS_HASH_PERSONALIZATION[crypto_generichash_blake2b_PERSONALBYTES] =
+const unsigned char ZCASH_PREVOUTS_HASH_PERSONALIZATION[blake2b::PERSONALBYTES] =
     {'Z','c','a','s','h','P','r','e','v','o','u','t','H','a','s','h'};
-const unsigned char ZCASH_SEQUENCE_HASH_PERSONALIZATION[crypto_generichash_blake2b_PERSONALBYTES] =
+const unsigned char ZCASH_SEQUENCE_HASH_PERSONALIZATION[blake2b::PERSONALBYTES] =
     {'Z','c','a','s','h','S','e','q','u','e','n','c','H','a','s','h'};
-const unsigned char ZCASH_OUTPUTS_HASH_PERSONALIZATION[crypto_generichash_blake2b_PERSONALBYTES] =
+const unsigned char ZCASH_OUTPUTS_HASH_PERSONALIZATION[blake2b::PERSONALBYTES] =
     {'Z','c','a','s','h','O','u','t','p','u','t','s','H','a','s','h'};
-const unsigned char ZCASH_JOINSPLITS_HASH_PERSONALIZATION[crypto_generichash_blake2b_PERSONALBYTES] =
+const unsigned char ZCASH_JOINSPLITS_HASH_PERSONALIZATION[blake2b::PERSONALBYTES] =
     {'Z','c','a','s','h','J','S','p','l','i','t','s','H','a','s','h'};
-const unsigned char ZCASH_SHIELDED_SPENDS_HASH_PERSONALIZATION[crypto_generichash_blake2b_PERSONALBYTES] =
+const unsigned char ZCASH_SHIELDED_SPENDS_HASH_PERSONALIZATION[blake2b::PERSONALBYTES] =
     {'Z','c','a','s','h','S','S','p','e','n','d','s','H','a','s','h'};
-const unsigned char ZCASH_SHIELDED_OUTPUTS_HASH_PERSONALIZATION[crypto_generichash_blake2b_PERSONALBYTES] =
+const unsigned char ZCASH_SHIELDED_OUTPUTS_HASH_PERSONALIZATION[blake2b::PERSONALBYTES] =
     {'Z','c','a','s','h','S','O','u','t','p','u','t','H','a','s','h'};
 
 uint256 GetPrevoutHash(const CTransaction& txTo) {
@@ -1096,8 +1101,8 @@ uint256 GetOutputsHash(const CTransaction& txTo) {
 
 uint256 GetJoinSplitsHash(const CTransaction& txTo) {
     CBLAKE2bWriter ss(SER_GETHASH, static_cast<int>(txTo.GetHeader()), ZCASH_JOINSPLITS_HASH_PERSONALIZATION);
-    for (unsigned int n = 0; n < txTo.vjoinsplit.size(); n++) {
-        ss << txTo.vjoinsplit[n];
+    for (unsigned int n = 0; n < txTo.vJoinSplit.size(); n++) {
+        ss << txTo.vJoinSplit[n];
     }
     ss << txTo.joinSplitPubKey;
     return ss.GetHash();
@@ -1105,40 +1110,89 @@ uint256 GetJoinSplitsHash(const CTransaction& txTo) {
 
 uint256 GetShieldedSpendsHash(const CTransaction& txTo) {
     CBLAKE2bWriter ss(SER_GETHASH, 0, ZCASH_SHIELDED_SPENDS_HASH_PERSONALIZATION);
-    for (unsigned int n = 0; n < txTo.vShieldedSpend.size(); n++) {
-        ss << txTo.vShieldedSpend[n].cv;
-        ss << txTo.vShieldedSpend[n].anchor;
-        ss << txTo.vShieldedSpend[n].nullifier;
-        ss << txTo.vShieldedSpend[n].rk;
-        ss << txTo.vShieldedSpend[n].zkproof;
+    for (const auto& spend : txTo.GetSaplingSpends()) {
+        ss << spend.cv();
+        ss << spend.anchor();
+        ss << spend.nullifier();
+        ss << spend.rk();
+        ss << spend.zkproof();
     }
     return ss.GetHash();
 }
 
 uint256 GetShieldedOutputsHash(const CTransaction& txTo) {
     CBLAKE2bWriter ss(SER_GETHASH, 0, ZCASH_SHIELDED_OUTPUTS_HASH_PERSONALIZATION);
-    for (unsigned int n = 0; n < txTo.vShieldedOutput.size(); n++) {
-        ss << txTo.vShieldedOutput[n];
+    auto ssRs = ToRustStream(ss);
+    for (const auto& output : txTo.GetSaplingOutputs()) {
+        output.serialize_v4(*ssRs);
     }
     return ss.GetHash();
 }
 
 } // anon namespace
 
-PrecomputedTransactionData::PrecomputedTransactionData(const CTransaction& txTo)
+PrecomputedTransactionData::PrecomputedTransactionData(
+    const CTransaction& txTo,
+    const std::vector<CTxOut>& allPrevOutputs) :
+    preTx(nullptr, zcash_transaction_precomputed_free)
 {
-    hashPrevouts = GetPrevoutHash(txTo);
-    hashSequence = GetSequenceHash(txTo);
-    hashOutputs = GetOutputsHash(txTo);
-    hashJoinSplits = GetJoinSplitsHash(txTo);
-    hashShieldedSpends = GetShieldedSpendsHash(txTo);
-    hashShieldedOutputs = GetShieldedOutputsHash(txTo);
+    CDataStream sAllPrevOutputs(SER_NETWORK, PROTOCOL_VERSION);
+    sAllPrevOutputs << allPrevOutputs;
+    SetPrecomputed(
+        txTo,
+        reinterpret_cast<const unsigned char*>(sAllPrevOutputs.data()),
+        sAllPrevOutputs.size());
+}
+
+PrecomputedTransactionData::PrecomputedTransactionData(
+    const CTransaction& txTo,
+    const unsigned char* allPrevOutputs,
+    size_t allPrevOutputsLen) :
+    preTx(nullptr, zcash_transaction_precomputed_free)
+{
+    SetPrecomputed(txTo, allPrevOutputs, allPrevOutputsLen);
+}
+
+void PrecomputedTransactionData::SetPrecomputed(
+    const CTransaction& txTo,
+    const unsigned char* allPrevOutputs,
+    size_t allPrevOutputsLen)
+{
+    bool isOverwinterV3 =
+        txTo.fOverwintered &&
+        txTo.nVersionGroupId == OVERWINTER_VERSION_GROUP_ID &&
+        txTo.nVersion == OVERWINTER_TX_VERSION;
+    bool isSaplingV4 =
+        txTo.fOverwintered &&
+        txTo.nVersionGroupId == SAPLING_VERSION_GROUP_ID &&
+        txTo.nVersion == SAPLING_TX_VERSION;
+
+    if (!txTo.fOverwintered || isOverwinterV3 || isSaplingV4) {
+        hashPrevouts = GetPrevoutHash(txTo);
+        hashSequence = GetSequenceHash(txTo);
+        hashOutputs = GetOutputsHash(txTo);
+        hashJoinSplits = GetJoinSplitsHash(txTo);
+        hashShieldedSpends = GetShieldedSpendsHash(txTo);
+        hashShieldedOutputs = GetShieldedOutputsHash(txTo);
+    } else {
+        // TODO: If we already have this serialized, use it.
+        CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
+        ss << txTo;
+        preTx.reset(zcash_transaction_precomputed_init(
+            reinterpret_cast<const unsigned char*>(ss.data()),
+            ss.size(), allPrevOutputs, allPrevOutputsLen));
+        if (preTx == nullptr) {
+            throw std::ios_base::failure("Invalid arguments to PrecomputedTransactionData");
+        }
+    }
 }
 
 SigVersion SignatureHashVersion(const CTransaction& txTo)
 {
     if (txTo.fOverwintered) {
-        if (txTo.nVersionGroupId == SAPLING_VERSION_GROUP_ID) {
+        if (txTo.nVersionGroupId == ZIP225_VERSION_GROUP_ID) {
+            return SIGVERSION_ZIP244;
+        } else if (txTo.nVersionGroupId == SAPLING_VERSION_GROUP_ID) {
             return SIGVERSION_SAPLING;
         } else {
             return SIGVERSION_OVERWINTER;
@@ -1155,7 +1209,7 @@ uint256 SignatureHash(
     int nHashType,
     const CAmount& amount,
     uint32_t consensusBranchId,
-    const PrecomputedTransactionData* cache)
+    const PrecomputedTransactionData& txdata)
 {
     if (nIn >= txTo.vin.size() && nIn != NOT_AN_INPUT) {
         //  nIn out of range
@@ -1164,7 +1218,64 @@ uint256 SignatureHash(
 
     auto sigversion = SignatureHashVersion(txTo);
 
-    if (sigversion == SIGVERSION_OVERWINTER || sigversion == SIGVERSION_SAPLING) {
+    if (sigversion == SIGVERSION_ZIP244) {
+        // ZIP 244, S.2: transparent_sig_digest
+        //
+        // If we are producing a hash for either a coinbase transaction, or a
+        // non-coinbase transaction that has no transparent inputs, the value of
+        // transparent_sig_digest is identical to the value specified in section
+        // T.2.
+        //
+        // https://zips.z.cash/zip-0244#s-2-transparent-sig-digest
+        if (txTo.IsCoinBase() || txTo.vin.empty()) {
+            // This situation only applies to shielded signatures.
+            assert(nIn == NOT_AN_INPUT);
+            assert(nHashType == SIGHASH_ALL);
+            // The signature digest is just the txid! No need to cross the FFI.
+            return txTo.GetHash();
+        } else {
+            // S.2a: hash_type
+            //
+            // The following restrictions apply, which cause validation failure
+            // if violated:
+            // - Using any undefined hash_type (not 0x01, 0x02, 0x03, 0x81,
+            //   0x82, or 0x83).
+            // - Using SIGHASH_SINGLE without a "corresponding output" (an
+            //   output with the same index as the input being verified).
+            switch (nHashType) {
+            case SIGHASH_SINGLE:
+            case SIGHASH_ANYONECANPAY | SIGHASH_SINGLE:
+                if (nIn >= txTo.vout.size()) {
+                    throw std::logic_error(
+                        "ZIP 244: Used SIGHASH_SINGLE without a corresponding output");
+                }
+            case SIGHASH_ALL:
+            case SIGHASH_NONE:
+            case SIGHASH_ANYONECANPAY | SIGHASH_ALL:
+            case SIGHASH_ANYONECANPAY | SIGHASH_NONE:
+                break;
+            default:
+                throw std::logic_error("ZIP 244: Used undefined hash_type");
+            }
+
+            // The amount parameter is ignored; we extract it from allPrevOutputs.
+            // - Note to future developers: if we ever replace the C++ logic for
+            //   pre-v5 transactions with Rust logic, make sure signrawtransaction
+            //   is updated to know about it!
+            // The consensusBranchId parameter is ignored; we use the value stored
+            // in the transaction itself.
+            uint256 hash;
+            if (!zcash_transaction_zip244_signature_digest(
+                txdata.preTx.get(),
+                nHashType,
+                nIn,
+                hash.begin()))
+            {
+                throw std::logic_error("We should not reach here.");
+            }
+            return hash;
+        }
+    } else if (sigversion == SIGVERSION_OVERWINTER || sigversion == SIGVERSION_SAPLING) {
         uint256 hashPrevouts;
         uint256 hashSequence;
         uint256 hashOutputs;
@@ -1173,31 +1284,31 @@ uint256 SignatureHash(
         uint256 hashShieldedOutputs;
 
         if (!(nHashType & SIGHASH_ANYONECANPAY)) {
-            hashPrevouts = cache ? cache->hashPrevouts : GetPrevoutHash(txTo);
+            hashPrevouts = txdata.hashPrevouts;
         }
 
         if (!(nHashType & SIGHASH_ANYONECANPAY) && (nHashType & 0x1f) != SIGHASH_SINGLE && (nHashType & 0x1f) != SIGHASH_NONE) {
-            hashSequence = cache ? cache->hashSequence : GetSequenceHash(txTo);
+            hashSequence = txdata.hashSequence;
         }
 
         if ((nHashType & 0x1f) != SIGHASH_SINGLE && (nHashType & 0x1f) != SIGHASH_NONE) {
-            hashOutputs = cache ? cache->hashOutputs : GetOutputsHash(txTo);
+            hashOutputs = txdata.hashOutputs;
         } else if ((nHashType & 0x1f) == SIGHASH_SINGLE && nIn < txTo.vout.size()) {
             CBLAKE2bWriter ss(SER_GETHASH, 0, ZCASH_OUTPUTS_HASH_PERSONALIZATION);
             ss << txTo.vout[nIn];
             hashOutputs = ss.GetHash();
         }
 
-        if (!txTo.vjoinsplit.empty()) {
-            hashJoinSplits = cache ? cache->hashJoinSplits : GetJoinSplitsHash(txTo);
+        if (!txTo.vJoinSplit.empty()) {
+            hashJoinSplits = txdata.hashJoinSplits;
         }
 
-        if (!txTo.vShieldedSpend.empty()) {
-            hashShieldedSpends = cache ? cache->hashShieldedSpends : GetShieldedSpendsHash(txTo);
+        if (txTo.GetSaplingSpendsCount() > 0) {
+            hashShieldedSpends = txdata.hashShieldedSpends;
         }
 
-        if (!txTo.vShieldedOutput.empty()) {
-            hashShieldedOutputs = cache ? cache->hashShieldedOutputs : GetShieldedOutputsHash(txTo);
+        if (txTo.GetSaplingOutputsCount() > 0) {
+            hashShieldedOutputs = txdata.hashShieldedOutputs;
         }
 
         uint32_t leConsensusBranchId = htole32(consensusBranchId);
@@ -1229,7 +1340,7 @@ uint256 SignatureHash(
         ss << txTo.nExpiryHeight;
         if (sigversion == SIGVERSION_SAPLING) {
             // Sapling value balance
-            ss << txTo.valueBalance;
+            ss << txTo.GetValueBalanceSapling();
         }
         // Sighash type
         ss << nHashType;

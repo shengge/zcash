@@ -1,6 +1,7 @@
 // Copyright (c) 2012-2013 The Bitcoin Core developers
+// Copyright (c) 2016-2023 The Zcash developers
 // Distributed under the MIT software license, see the accompanying
-// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+// file COPYING or https://www.opensource.org/licenses/mit-license.php .
 #include "addrman.h"
 #include "test/test_bitcoin.h"
 #include <string>
@@ -25,11 +26,12 @@ public:
     void MakeDeterministic()
     {
         nKey.SetNull();
-        seed_insecure_rand(true);
+        insecure_rand = FastRandomContext(true);
     }
 
     int RandomInt(int nMax)
     {
+        assert(nMax >= 0);
         state = (CHashWriter(SER_GETHASH, 0) << state).GetHash().GetCheapHash();
         return (unsigned int)(state % nMax);
     }
@@ -180,10 +182,11 @@ BOOST_AUTO_TEST_CASE(addrman_select)
     BOOST_CHECK(addrman.size() == 7);
 
     // Test 12: Select pulls from new and tried regardless of port number.
-    BOOST_CHECK(addrman.Select().ToString() == "250.4.6.6:8333");
-    BOOST_CHECK(addrman.Select().ToString() == "250.3.2.2:9999");
-    BOOST_CHECK(addrman.Select().ToString() == "250.3.3.3:9999");
-    BOOST_CHECK(addrman.Select().ToString() == "250.4.4.4:8333");
+    std::set<uint16_t> ports;
+    for (int i = 0; i < 20; ++i) {
+        ports.insert(addrman.Select().GetPort());
+    }
+    BOOST_CHECK_EQUAL(ports.size(), 3);
 }
 
 BOOST_AUTO_TEST_CASE(addrman_new_collisions)
@@ -345,15 +348,15 @@ BOOST_AUTO_TEST_CASE(addrman_getaddr)
     BOOST_CHECK(vAddr1.size() == 0);
 
     CAddress addr1 = CAddress(CService("250.250.2.1", 8333));
-    addr1.nTime = GetAdjustedTime(); // Set time so isTerrible = false
+    addr1.nTime = GetTime(); // Set time so isTerrible = false
     CAddress addr2 = CAddress(CService("250.251.2.2", 9999));
-    addr2.nTime = GetAdjustedTime();
+    addr2.nTime = GetTime();
     CAddress addr3 = CAddress(CService("251.252.2.3", 8333));
-    addr3.nTime = GetAdjustedTime();
+    addr3.nTime = GetTime();
     CAddress addr4 = CAddress(CService("252.253.3.4", 8333));
-    addr4.nTime = GetAdjustedTime();
+    addr4.nTime = GetTime();
     CAddress addr5 = CAddress(CService("252.254.4.5", 8333));
-    addr5.nTime = GetAdjustedTime();
+    addr5.nTime = GetTime();
     CNetAddr source1 = CNetAddr("250.1.2.1");
     CNetAddr source2 = CNetAddr("250.2.3.3");
 
@@ -381,7 +384,7 @@ BOOST_AUTO_TEST_CASE(addrman_getaddr)
         CAddress addr = CAddress(CService(strAddr));
         
         // Ensure that for all addrs in addrman, isTerrible == false.
-        addr.nTime = GetAdjustedTime();
+        addr.nTime = GetTime();
         addrman.Add(addr, CNetAddr(strAddr));
         if (i % 8 == 0)
             addrman.Good(addr);
@@ -391,7 +394,7 @@ BOOST_AUTO_TEST_CASE(addrman_getaddr)
     size_t percent23 = (addrman.size() * 23) / 100;
     BOOST_CHECK(vAddr.size() == percent23);
     BOOST_CHECK(vAddr.size() == 461);
-    // (Addrman.size() < number of addresses added) due to address collisons.
+    // (Addrman.size() < number of addresses added) due to address collisions.
     BOOST_CHECK(addrman.size() == 2007);
 }
 

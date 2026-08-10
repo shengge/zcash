@@ -1,18 +1,19 @@
 // Copyright (c) 2013-2014 The Bitcoin Core developers
+// Copyright (c) 2016-2023 The Zcash developers
 // Distributed under the MIT software license, see the accompanying
-// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+// file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 #include "clientversion.h"
 #include "consensus/validation.h"
+#include "fs.h"
 #include "main.h"
+#include "proof_verifier.h"
 #include "test/test_bitcoin.h"
-#include "utiltime.h"
+#include "util/time.h"
 #include "zcash/Proof.hpp"
 
 #include <cstdio>
 
-#include <boost/filesystem/operations.hpp>
-#include <boost/filesystem/path.hpp>
 #include <boost/test/unit_test.hpp>
 
 
@@ -20,7 +21,6 @@ BOOST_FIXTURE_TEST_SUITE(CheckBlock_tests, BasicTestingSetup)
 
 bool read_block(const std::string& filename, CBlock& block)
 {
-    namespace fs = boost::filesystem;
     fs::path testFile = fs::current_path() / "data" / filename;
 #ifdef TEST_DATA_DIR
     if (!fs::exists(testFile))
@@ -28,7 +28,7 @@ bool read_block(const std::string& filename, CBlock& block)
         testFile = fs::path(BOOST_PP_STRINGIZE(TEST_DATA_DIR)) / filename;
     }
 #endif
-    FILE* fp = fopen(testFile.string().c_str(), "rb");
+    FILE* fp = fsbridge::fopen(testFile, "rb");
     if (!fp) return false;
 
     fseek(fp, 8, SEEK_SET); // skip msgheader/size
@@ -47,8 +47,11 @@ BOOST_AUTO_TEST_CASE(May15)
     // idea, so this test is only run if you manually download
     // test/data/Mar12Fork.dat from
     // http://sourceforge.net/projects/bitcoin/files/Bitcoin/blockchain/Mar12Fork.dat/download
-    unsigned int tMay15 = 1368576000;
-    SetMockTime(tMay15); // Test as if it was right at May 15
+    FixedClock::SetGlobal();
+
+    // Test as if the time is exactly 2013-05-15 00:00:00Z
+    int64_t tMay15 = 1368576000;
+    FixedClock::Instance()->Set(std::chrono::seconds(tMay15));
 
     CBlock forkingBlock;
     if (read_block("Mar12Fork.dat", forkingBlock))
@@ -57,11 +60,11 @@ BOOST_AUTO_TEST_CASE(May15)
 
         // After May 15'th, big blocks are OK:
         forkingBlock.nTime = tMay15; // Invalidates PoW
-        auto verifier = libzcash::ProofVerifier::Strict();
-        BOOST_CHECK(CheckBlock(forkingBlock, state, verifier, false, false));
+        auto verifier = ProofVerifier::Strict();
+        BOOST_CHECK(CheckBlock(forkingBlock, state, Params(), verifier, false, false, true));
     }
 
-    SetMockTime(0);
+    SystemClock::SetGlobal();
 }
 
 BOOST_AUTO_TEST_SUITE_END()

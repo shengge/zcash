@@ -1,16 +1,18 @@
 #include <gtest/gtest.h>
 
-#include "utilstrencodings.h"
+#include "util/strencodings.h"
 
-#include <boost/foreach.hpp>
-#include <boost/variant/get.hpp>
 
 #include "zcash/prf.h"
-#include "util.h"
+#include "util/system.h"
 #include "streams.h"
 #include "version.h"
 #include "serialize.h"
 #include "primitives/transaction.h"
+#include "proof_verifier.h"
+#include "transaction_builder.h"
+#include "gtest/utils.h"
+#include "util/test.h"
 #include "zcash/JoinSplit.hpp"
 #include "zcash/Note.hpp"
 #include "zcash/NoteEncryption.hpp"
@@ -18,48 +20,37 @@
 
 #include <array>
 
+#include <rust/ed25519.h>
+
 using namespace libzcash;
 
-extern ZCJoinSplit* params;
-
-typedef std::array<JSDescription, 2> SproutProofs;
-// Make both the PHGR and Groth proof for a Sprout statement,
-// and store the results in JSDescription objects.
-SproutProofs makeSproutProofs(
-        ZCJoinSplit& js,
-        const std::array<JSInput, 2>& inputs,
-        const std::array<JSOutput, 2>& outputs,
-        const uint256& joinSplitPubKey,
+// Make the Groth proof for a Sprout statement,
+// and store the result in a JSDescription object.
+JSDescription makeSproutProof(
+        std::array<JSInput, 2>& inputs,
+        std::array<JSOutput, 2>& outputs,
+        const ed25519::VerificationKey& joinSplitPubKey,
         uint64_t vpub_old,
         uint64_t vpub_new,
         const uint256& rt
 ){
-    //Making the PHGR proof
-    JSDescription phgr(false, js, joinSplitPubKey, rt, inputs, outputs, vpub_old, vpub_new);
-    //Making the Groth proof
-    JSDescription groth(true, js, joinSplitPubKey, rt, inputs, outputs, vpub_old, vpub_new);
-
-    return {phgr, groth};
-
+    return JSDescriptionInfo(joinSplitPubKey, rt, inputs, outputs, vpub_old, vpub_new).BuildDeterministic();
 }
 
-bool verifySproutProofs(
-        ZCJoinSplit& js,
-        const SproutProofs& jsdescs,
-        const uint256& joinSplitPubKey
+bool verifySproutProof(
+        const JSDescription& jsdesc,
+        const ed25519::VerificationKey& joinSplitPubKey
 )
 {
-    auto verifier = libzcash::ProofVerifier::Strict();
-    bool phgrPassed = jsdescs[0].Verify(js, verifier, joinSplitPubKey);
-    bool grothPassed = jsdescs[1].Verify(js, verifier, joinSplitPubKey);
-    return phgrPassed && grothPassed;
+    auto verifier = ProofVerifier::Strict();
+    return verifier.VerifySprout(jsdesc, joinSplitPubKey);
 }
 
 
-void test_full_api(ZCJoinSplit* js)
+void test_full_api()
 {
     // Create verification context.
-    auto verifier = libzcash::ProofVerifier::Strict();
+    auto verifier = ProofVerifier::Strict();
 
     // The recipient's information.
     SproutSpendingKey recipient_key = SproutSpendingKey::random();
@@ -71,9 +62,10 @@ void test_full_api(ZCJoinSplit* js)
     // Set up a JoinSplit description
     uint64_t vpub_old = 10;
     uint64_t vpub_new = 0;
-    uint256 joinSplitPubKey = random_uint256();
+    ed25519::VerificationKey joinSplitPubKey;
+    GetRandBytes(joinSplitPubKey.bytes.data(), joinSplitPubKey.bytes.size());
     uint256 rt = tree.root();
-    SproutProofs jsdescs;
+    JSDescription jsdesc;
 
     {
         std::array<JSInput, 2> inputs = {
@@ -89,8 +81,7 @@ void test_full_api(ZCJoinSplit* js)
         std::array<SproutNote, 2> output_notes;
 
         // Perform the proofs
-        jsdescs = makeSproutProofs(
-            *js,
+        jsdesc = makeSproutProof(
             inputs,
             outputs,
             joinSplitPubKey,
@@ -101,16 +92,14 @@ void test_full_api(ZCJoinSplit* js)
     }
 
     // Verify both PHGR and Groth Proof:
-    ASSERT_TRUE(verifySproutProofs(*js, jsdescs, joinSplitPubKey));
+    ASSERT_TRUE(verifySproutProof(jsdesc, joinSplitPubKey));
 
-    // Run tests using both phgr and groth as basis for field values
-    for (auto jsdesc : jsdescs)
     {
         SproutMerkleTree tree;
-        SproutProofs jsdescs2;
+        JSDescription jsdesc2;
         // Recipient should decrypt
         // Now the recipient should spend the money again
-        auto h_sig = js->h_sig(jsdesc.randomSeed, jsdesc.nullifiers, joinSplitPubKey);
+        auto h_sig = ZCJoinSplit::h_sig(jsdesc.randomSeed, jsdesc.nullifiers, joinSplitPubKey);
         ZCNoteDecryption decryptor(recipient_key.receiving_key());
 
         auto note_pt = SproutNotePlaintext::decrypt(
@@ -133,7 +122,8 @@ void test_full_api(ZCJoinSplit* js)
         vpub_old = 0;
         vpub_new = 1;
         rt = tree.root();
-        auto joinSplitPubKey2 = random_uint256();
+        ed25519::VerificationKey joinSplitPubKey2;
+        GetRandBytes(joinSplitPubKey2.bytes.data(), joinSplitPubKey2.bytes.size());
 
         {
             std::array<JSInput, 2> inputs = {
@@ -153,8 +143,7 @@ void test_full_api(ZCJoinSplit* js)
 
 
             // Perform the proofs
-            jsdescs2 = makeSproutProofs(
-                *js,
+            jsdesc2 = makeSproutProof(
                 inputs,
                 outputs,
                 joinSplitPubKey2,
@@ -166,15 +155,14 @@ void test_full_api(ZCJoinSplit* js)
         }
 
 
-        // Verify both PHGR and Groth Proof:
-        ASSERT_TRUE(verifySproutProofs(*js, jsdescs2, joinSplitPubKey2));
+        // Verify Groth Proof:
+        ASSERT_TRUE(verifySproutProof(jsdesc2, joinSplitPubKey2));
     }
 }
 
 // Invokes the API (but does not compute a proof)
 // to test exceptions
 void invokeAPI(
-    ZCJoinSplit* js,
     const std::array<JSInput, 2>& inputs,
     const std::array<JSOutput, 2>& outputs,
     uint64_t vpub_old,
@@ -183,7 +171,8 @@ void invokeAPI(
 ) {
     uint256 ephemeralKey;
     uint256 randomSeed;
-    uint256 joinSplitPubKey = random_uint256();
+    ed25519::VerificationKey joinSplitPubKey;
+    GetRandBytes(joinSplitPubKey.bytes.data(), joinSplitPubKey.bytes.size());
     std::array<uint256, 2> macs;
     std::array<uint256, 2> nullifiers;
     std::array<uint256, 2> commitments;
@@ -191,28 +180,8 @@ void invokeAPI(
 
     std::array<SproutNote, 2> output_notes;
 
-    // PHGR
-    SproutProof proof = js->prove(
-        false,
-        inputs,
-        outputs,
-        output_notes,
-        ciphertexts,
-        ephemeralKey,
-        joinSplitPubKey,
-        randomSeed,
-        macs,
-        nullifiers,
-        commitments,
-        vpub_old,
-        vpub_new,
-        rt,
-        false
-    );
-
     // Groth
-    proof = js->prove(
-        true,
+    SproutProof proof = ZCJoinSplit::prove(
         inputs,
         outputs,
         output_notes,
@@ -231,7 +200,6 @@ void invokeAPI(
 }
 
 void invokeAPIFailure(
-    ZCJoinSplit* js,
     const std::array<JSInput, 2>& inputs,
     const std::array<JSOutput, 2>& outputs,
     uint64_t vpub_old,
@@ -241,7 +209,7 @@ void invokeAPIFailure(
 )
 {
     try {
-        invokeAPI(js, inputs, outputs, vpub_old, vpub_new, rt);
+        invokeAPI(inputs, outputs, vpub_old, vpub_new, rt);
         FAIL() << "It worked, when it shouldn't have!";
     } catch(std::invalid_argument const & err) {
         EXPECT_EQ(err.what(), reason);
@@ -250,16 +218,16 @@ void invokeAPIFailure(
     }
 }
 
-TEST(joinsplit, h_sig)
+TEST(Joinsplit, HSig)
 {
 /*
 // by Taylor Hornby
 
-import pyblake2
+import hashlib
 import binascii
 
 def hSig(randomSeed, nf1, nf2, joinSplitPubKey):
-    return pyblake2.blake2b(
+    return hashlib.blake2b(
         data=(randomSeed + nf1 + nf2 + joinSplitPubKey),
         digest_size=32,
         person=b"ZcashComputehSig"
@@ -314,11 +282,14 @@ for test_input in TEST_VECTORS:
         }
     };
 
-    BOOST_FOREACH(std::vector<std::string>& v, tests) {
+    for (std::vector<std::string>& v : tests) {
+        ed25519::VerificationKey joinSplitPubKey;
+        auto pubKeyBytes = uint256S(v[3]);
+        std::copy(pubKeyBytes.begin(), pubKeyBytes.end(), joinSplitPubKey.bytes.begin());
         auto expected = ZCJoinSplit::h_sig(
             uint256S(v[0]),
             {uint256S(v[1]), uint256S(v[2])},
-            uint256S(v[3])
+            joinSplitPubKey
         );
 
         EXPECT_EQ(expected, uint256S(v[4]));
@@ -338,8 +309,10 @@ void increment_note_witnesses(
     witnesses.push_back(tree.witness());
 }
 
-TEST(joinsplit, full_api_test)
+TEST(Joinsplit, FullApiTest)
 {
+    LoadProofParameters();
+
     {
         std::vector<SproutWitness> witnesses;
         SproutMerkleTree tree;
@@ -358,7 +331,7 @@ TEST(joinsplit, full_api_test)
         increment_note_witnesses(note5.cm(), witnesses, tree);
 
         // Should work
-        invokeAPI(params,
+        invokeAPI(
         {
             JSInput(),
             JSInput()
@@ -372,7 +345,7 @@ TEST(joinsplit, full_api_test)
         tree.root());
 
         // lhs > MAX_MONEY
-        invokeAPIFailure(params,
+        invokeAPIFailure(
         {
             JSInput(),
             JSInput()
@@ -387,7 +360,7 @@ TEST(joinsplit, full_api_test)
         "nonsensical vpub_old value");
 
         // rhs > MAX_MONEY
-        invokeAPIFailure(params,
+        invokeAPIFailure(
         {
             JSInput(),
             JSInput()
@@ -402,7 +375,7 @@ TEST(joinsplit, full_api_test)
         "nonsensical vpub_new value");
 
         // input witness for the wrong element
-        invokeAPIFailure(params,
+        invokeAPIFailure(
         {
             JSInput(witnesses[0], note1, sk),
             JSInput()
@@ -418,7 +391,7 @@ TEST(joinsplit, full_api_test)
 
         // input witness doesn't match up with
         // real root
-        invokeAPIFailure(params,
+        invokeAPIFailure(
         {
             JSInput(witnesses[1], note1, sk),
             JSInput()
@@ -433,7 +406,7 @@ TEST(joinsplit, full_api_test)
         "joinsplit not anchored to the correct root");
 
         // input is in the tree now! this should work
-        invokeAPI(params,
+        invokeAPI(
         {
             JSInput(witnesses[1], note1, sk),
             JSInput()
@@ -447,7 +420,7 @@ TEST(joinsplit, full_api_test)
         tree.root());
 
         // Wrong secret key
-        invokeAPIFailure(params,
+        invokeAPIFailure(
         {
             JSInput(witnesses[1], note1, SproutSpendingKey::random()),
             JSInput()
@@ -462,7 +435,7 @@ TEST(joinsplit, full_api_test)
         "input note not authorized to spend with given key");
 
         // Absurd input value
-        invokeAPIFailure(params,
+        invokeAPIFailure(
         {
             JSInput(witnesses[3], note3, sk),
             JSInput()
@@ -477,7 +450,7 @@ TEST(joinsplit, full_api_test)
         "nonsensical input note value");
 
         // Absurd total input value
-        invokeAPIFailure(params,
+        invokeAPIFailure(
         {
             JSInput(witnesses[4], note4, sk),
             JSInput(witnesses[5], note5, sk)
@@ -492,7 +465,7 @@ TEST(joinsplit, full_api_test)
         "nonsensical left hand size of joinsplit balance");
 
         // Absurd output value
-        invokeAPIFailure(params,
+        invokeAPIFailure(
         {
             JSInput(),
             JSInput()
@@ -507,7 +480,7 @@ TEST(joinsplit, full_api_test)
         "nonsensical output value");
 
         // Absurd total output value
-        invokeAPIFailure(params,
+        invokeAPIFailure(
         {
             JSInput(),
             JSInput()
@@ -522,7 +495,7 @@ TEST(joinsplit, full_api_test)
         "nonsensical right hand side of joinsplit balance");
 
         // Absurd total output value
-        invokeAPIFailure(params,
+        invokeAPIFailure(
         {
             JSInput(),
             JSInput()
@@ -537,10 +510,10 @@ TEST(joinsplit, full_api_test)
         "invalid joinsplit balance");
     }
 
-    test_full_api(params);
+    test_full_api();
 }
 
-TEST(joinsplit, note_plaintexts)
+TEST(Joinsplit, NotePlaintexts)
 {
     uint252 a_sk = uint252(uint256S("f6da8716682d600f74fc16bd0187faad6a26b4aa4c24d5c055b216d94516840e"));
     uint256 a_pk = PRF_addr_a_pk(a_sk);
@@ -559,9 +532,7 @@ TEST(joinsplit, note_plaintexts)
               random_uint256()
              );
 
-    std::array<unsigned char, ZC_MEMO_SIZE> memo;
-
-    SproutNotePlaintext note_pt(note, memo);
+    SproutNotePlaintext note_pt(note, Memo::FromText("dummy memo").value());
 
     ZCNoteEncryption::Ciphertext ct = note_pt.encrypt(encryptor, pk_enc);
 
@@ -577,10 +548,6 @@ TEST(joinsplit, note_plaintexts)
 
     ASSERT_TRUE(decrypted.memo() == note_pt.memo());
 
-    // Check memo() returns by reference, not return by value, for use cases such as:
-    // std::string data(plaintext.memo().begin(), plaintext.memo().end());
-    ASSERT_TRUE(decrypted.memo().data() == decrypted.memo().data());
-
     // Check serialization of note plaintext
     CDataStream ss(SER_DISK, PROTOCOL_VERSION);
     ss << note_pt;
@@ -593,7 +560,7 @@ TEST(joinsplit, note_plaintexts)
     ASSERT_EQ(note_pt.r, note_pt2.r);
 }
 
-TEST(joinsplit, note_class)
+TEST(Joinsplit, NoteClass)
 {
     uint252 a_sk = uint252(uint256S("f6da8716682d600f74fc16bd0187faad6a26b4aa4c24d5c055b216d94516840e"));
     uint256 a_pk = PRF_addr_a_pk(a_sk);
@@ -613,4 +580,75 @@ TEST(joinsplit, note_class)
     ASSERT_EQ(note.rho, clone.rho);
     ASSERT_EQ(note.r, clone.r);
     ASSERT_EQ(note.a_pk, clone.a_pk);
+}
+
+TEST(Joinsplit, BasicJoinsplitVerification)
+{
+    LoadProofParameters();
+
+    // We only check that joinsplits are constructed properly
+    // and verify them here. It's generally libzcash's job
+    // to ensure the integrity of the Sprout protocol
+    // implementation through its own tests.
+
+    // construct a merkle tree
+    SproutMerkleTree merkleTree;
+
+    auto k = libzcash::SproutSpendingKey::random();
+    auto addr = k.address();
+
+    libzcash::SproutNote note(addr.a_pk, 100, uint256(), uint256());
+
+    // commitment from note
+    uint256 commitment = note.cm();
+
+    // insert commitment into the merkle tree
+    merkleTree.append(commitment);
+
+    // compute the merkle root we will be working with
+    uint256 rt = merkleTree.root();
+
+    auto witness = merkleTree.witness();
+
+    // create JSDescription
+    ed25519::VerificationKey joinSplitPubKey;
+    std::array<libzcash::JSInput, ZC_NUM_JS_INPUTS> inputs = {
+        libzcash::JSInput(witness, note, k),
+        libzcash::JSInput() // dummy input of zero value
+    };
+    std::array<libzcash::JSOutput, ZC_NUM_JS_OUTPUTS> outputs = {
+        libzcash::JSOutput(addr, 50),
+        libzcash::JSOutput(addr, 50)
+    };
+
+    auto verifier = ProofVerifier::Strict();
+
+    {
+        auto jsdesc = JSDescriptionInfo(joinSplitPubKey, rt, inputs, outputs, 0, 0).BuildDeterministic();
+        EXPECT_TRUE(verifier.VerifySprout(jsdesc, joinSplitPubKey));
+
+        CDataStream ss(SER_DISK, CLIENT_VERSION);
+        auto os = WithVersion(&ss, SAPLING_TX_VERSION | 1 << 31);
+        os << jsdesc;
+
+        JSDescription jsdesc_deserialized;
+        os >> jsdesc_deserialized;
+
+        EXPECT_TRUE(jsdesc_deserialized == jsdesc);
+        EXPECT_TRUE(verifier.VerifySprout(jsdesc_deserialized, joinSplitPubKey));
+    }
+
+    {
+        // Ensure that the balance equation is working.
+        EXPECT_THROW(JSDescriptionInfo(joinSplitPubKey, rt, inputs, outputs, 10, 0).BuildDeterministic(), std::invalid_argument);
+        EXPECT_THROW(JSDescriptionInfo(joinSplitPubKey, rt, inputs, outputs, 0, 10).BuildDeterministic(), std::invalid_argument);
+    }
+
+    {
+        // Ensure that it won't verify if the root is changed.
+        auto test = JSDescriptionInfo(joinSplitPubKey, rt, inputs, outputs, 0, 0).BuildDeterministic();
+        test.anchor = GetRandHash();
+        EXPECT_FALSE(verifier.VerifySprout(test, joinSplitPubKey));
+    }
+
 }

@@ -4,51 +4,36 @@
 #include "chainparams.h"
 #include "clientversion.h"
 #include "deprecation.h"
+#include "fs.h"
+#include "gtest/utils.h"
 #include "init.h"
 #include "ui_interface.h"
-#include "util.h"
-#include "utilstrencodings.h"
+#include "util/system.h"
+#include "util/strencodings.h"
 
-#include <boost/filesystem/operations.hpp>
 #include <fstream>
 
+using namespace boost::placeholders;
 using ::testing::StrictMock;
 
 static const std::string CLIENT_VERSION_STR = FormatVersion(CLIENT_VERSION);
-extern std::atomic<bool> fRequestShutdown;
-
-class MockUIInterface {
-public:
-    MOCK_METHOD3(ThreadSafeMessageBox, bool(const std::string& message,
-                                      const std::string& caption,
-                                      unsigned int style));
-};
-
-static bool ThreadSafeMessageBox(MockUIInterface *mock,
-                                 const std::string& message,
-                                 const std::string& caption,
-                                 unsigned int style)
-{
-    return mock->ThreadSafeMessageBox(message, caption, style);
-}
 
 class DeprecationTest : public ::testing::Test {
 protected:
-    virtual void SetUp() {
-        uiInterface.ThreadSafeMessageBox.disconnect_all_slots();
-        uiInterface.ThreadSafeMessageBox.connect(boost::bind(ThreadSafeMessageBox, &mock_, _1, _2, _3));
+    void SetUp() override {
+        ConnectMockUIInterface(mock_);
         SelectParams(CBaseChainParams::MAIN);
-        
+
     }
 
-    virtual void TearDown() {
-        fRequestShutdown = false;
+    void TearDown() override {
+        DisconnectMockUIInterface();
         mapArgs.clear();
     }
 
     StrictMock<MockUIInterface> mock_;
 
-    static std::vector<std::string> read_lines(boost::filesystem::path filepath) {
+    static std::vector<std::string> read_lines(fs::path filepath) {
         std::vector<std::string> result;
 
         std::ifstream f(filepath.string().c_str());
@@ -63,72 +48,72 @@ protected:
 
 TEST_F(DeprecationTest, NonDeprecatedNodeKeepsRunning) {
     EXPECT_FALSE(ShutdownRequested());
-    EnforceNodeDeprecation(DEPRECATION_HEIGHT - DEPRECATION_WARN_LIMIT - 1);
+    EnforceNodeDeprecation(Params(), DEPRECATION_HEIGHT - DEPRECATION_WARN_LIMIT - 1);
     EXPECT_FALSE(ShutdownRequested());
 }
 
 TEST_F(DeprecationTest, NodeNearDeprecationIsWarned) {
     EXPECT_FALSE(ShutdownRequested());
     EXPECT_CALL(mock_, ThreadSafeMessageBox(::testing::_, "", CClientUIInterface::MSG_WARNING));
-    EnforceNodeDeprecation(DEPRECATION_HEIGHT - DEPRECATION_WARN_LIMIT);
+    EnforceNodeDeprecation(Params(), DEPRECATION_HEIGHT - DEPRECATION_WARN_LIMIT);
     EXPECT_FALSE(ShutdownRequested());
 }
 
 TEST_F(DeprecationTest, NodeNearDeprecationWarningIsNotDuplicated) {
     EXPECT_FALSE(ShutdownRequested());
-    EnforceNodeDeprecation(DEPRECATION_HEIGHT - DEPRECATION_WARN_LIMIT + 1);
+    EnforceNodeDeprecation(Params(), DEPRECATION_HEIGHT - DEPRECATION_WARN_LIMIT + 1);
     EXPECT_FALSE(ShutdownRequested());
 }
 
 TEST_F(DeprecationTest, NodeNearDeprecationWarningIsRepeatedOnStartup) {
     EXPECT_FALSE(ShutdownRequested());
     EXPECT_CALL(mock_, ThreadSafeMessageBox(::testing::_, "", CClientUIInterface::MSG_WARNING));
-    EnforceNodeDeprecation(DEPRECATION_HEIGHT - DEPRECATION_WARN_LIMIT + 1, true);
+    EnforceNodeDeprecation(Params(), DEPRECATION_HEIGHT - DEPRECATION_WARN_LIMIT + 1, true);
     EXPECT_FALSE(ShutdownRequested());
 }
 
 TEST_F(DeprecationTest, DeprecatedNodeShutsDown) {
     EXPECT_FALSE(ShutdownRequested());
     EXPECT_CALL(mock_, ThreadSafeMessageBox(::testing::_, "", CClientUIInterface::MSG_ERROR));
-    EnforceNodeDeprecation(DEPRECATION_HEIGHT);
+    EnforceNodeDeprecation(Params(), DEPRECATION_HEIGHT);
     EXPECT_TRUE(ShutdownRequested());
 }
 
 TEST_F(DeprecationTest, DeprecatedNodeErrorIsNotDuplicated) {
     EXPECT_FALSE(ShutdownRequested());
-    EnforceNodeDeprecation(DEPRECATION_HEIGHT + 1);
+    EnforceNodeDeprecation(Params(), DEPRECATION_HEIGHT + 1);
     EXPECT_TRUE(ShutdownRequested());
 }
 
 TEST_F(DeprecationTest, DeprecatedNodeErrorIsRepeatedOnStartup) {
     EXPECT_FALSE(ShutdownRequested());
     EXPECT_CALL(mock_, ThreadSafeMessageBox(::testing::_, "", CClientUIInterface::MSG_ERROR));
-    EnforceNodeDeprecation(DEPRECATION_HEIGHT + 1, true);
+    EnforceNodeDeprecation(Params(), DEPRECATION_HEIGHT + 1, true);
     EXPECT_TRUE(ShutdownRequested());
 }
 
 TEST_F(DeprecationTest, DeprecatedNodeIgnoredOnRegtest) {
     SelectParams(CBaseChainParams::REGTEST);
     EXPECT_FALSE(ShutdownRequested());
-    EnforceNodeDeprecation(DEPRECATION_HEIGHT+1);
+    EnforceNodeDeprecation(Params(), DEPRECATION_HEIGHT+1);
     EXPECT_FALSE(ShutdownRequested());
 }
 
 TEST_F(DeprecationTest, DeprecatedNodeIgnoredOnTestnet) {
     SelectParams(CBaseChainParams::TESTNET);
     EXPECT_FALSE(ShutdownRequested());
-    EnforceNodeDeprecation(DEPRECATION_HEIGHT+1);
+    EnforceNodeDeprecation(Params(), DEPRECATION_HEIGHT+1);
     EXPECT_FALSE(ShutdownRequested());
 }
 
 TEST_F(DeprecationTest, AlertNotify) {
-    boost::filesystem::path temp = GetTempPath() /
-        boost::filesystem::unique_path("alertnotify-%%%%.txt");
+    fs::path temp = fs::temp_directory_path() /
+        fs::unique_path("alertnotify-%%%%.txt");
 
     mapArgs["-alertnotify"] = std::string("echo %s >> ") + temp.string();
 
     EXPECT_CALL(mock_, ThreadSafeMessageBox(::testing::_, "", CClientUIInterface::MSG_WARNING));
-    EnforceNodeDeprecation(DEPRECATION_HEIGHT - DEPRECATION_WARN_LIMIT, false, false);
+    EnforceNodeDeprecation(Params(), DEPRECATION_HEIGHT - DEPRECATION_WARN_LIMIT, false, false);
 
     std::vector<std::string> r = read_lines(temp);
     EXPECT_EQ(r.size(), 1u);
@@ -145,5 +130,5 @@ TEST_F(DeprecationTest, AlertNotify) {
 #else
     EXPECT_EQ(r[0], strprintf("'%s' ", expectedMsg));
 #endif
-    boost::filesystem::remove(temp);
+    fs::remove(temp);
 }
